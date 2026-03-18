@@ -42,12 +42,12 @@ python main.py
 | Tab | Description |
 |-----|-------------|
 | **Events** | Live countdown timers for all map events (storms, night raids, etc.) with configurable audio/visual alerts at custom thresholds |
-| **Items** | Searchable item database — sell value, recycle output, quest requirement flag; double-click for full item detail |
+| **Items** | Searchable item database with sell value, recycle output, workbench, and quest flag; double-click any row for full item detail |
 | **Map** | POI viewer for all five maps: Dam, Spaceport, Buried City, Blue Gate, Stella Montis |
 | **Quests** | Quest list with trader filter, text search, and manual progress tracking (persisted) |
 | **Needed Items** | Aggregates required items across all quests; track how many you have vs. still need — persisted between sessions |
-| **Hideout** | Workshop/hideout upgrade tracker with completion checkboxes; falls back to showing workbench items if the dedicated API endpoint isn't live yet |
-| **Blueprints** | Track which blueprints you've found; filters the item database for blueprint-category items |
+| **Hideout** | Workshop/hideout upgrade tracker with completion checkboxes; falls back to workbench items if the dedicated API endpoint isn't live |
+| **Blueprints** | Track which blueprints you've found; merges MetaForge and ARDB data, filtered to blueprint-category items |
 | **Weekly Trials** | Tracks the current week's trials with completion state that auto-resets each Monday |
 
 ### In-game overlay (Alt+Z)
@@ -61,7 +61,19 @@ A separate always-on-top transparent window showing live event countdowns, desig
 
 ### Item scanner (Alt+X)
 
-Press **Alt+X** while hovering an item name in-game. The app captures a screen region, reads the text via OCR, and automatically searches the Items tab.
+Press **Alt+X** while hovering an item name in-game. The app captures a screen region, reads the text via OCR, and displays a rich floating popup card showing:
+
+| Field | Source |
+|-------|--------|
+| Name, rarity, type, description | MetaForge API |
+| Sell value, weight, stack size | MetaForge / arcraiders-data |
+| Recycle / salvage output | arcraiders-data (exact materials + quantities) |
+| Sold by (trader, cost, daily limit) | arcraiders-data |
+| Used in (what items craft with this) | arcraiders-data |
+| Required by quests | MetaForge quest data |
+| Sources / loot locations | MetaForge API |
+
+The popup stays on screen for 15 seconds and pauses the timer while you hover over it. Click **×** to dismiss early.
 
 Requires Tesseract OCR to be installed — see Requirements above.
 
@@ -98,8 +110,13 @@ Settings are stored in `config/settings.json` and are editable in-app.
 
 ## Data Sources
 
-- Primary: [MetaForge](https://metaforge.app/arc-raiders/api) public API
-- Fallback: [ARDB](https://ardb.app/api) for items and quests
+| Source | Used for |
+|--------|----------|
+| [MetaForge](https://metaforge.app/arc-raiders/api) public API | Events, items, quests, map POIs, hideout, trials (primary) |
+| [ARDB](https://ardb.app/api) | Items and quests fallback |
+| [arcraiders-data](https://github.com/RaidTheory/arcraiders-data) by RaidTheory | Recycle/salvage output, trader prices, crafting recipes, quest item cross-reference |
+
+The arcraiders-data dataset is MIT-licensed. Per its licence terms this app links to the source repository and to [arctracker.io](https://arctracker.io).
 
 ---
 

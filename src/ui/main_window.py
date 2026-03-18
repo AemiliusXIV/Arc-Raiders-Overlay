@@ -15,8 +15,10 @@ from PyQt6.QtWidgets import (
 
 from src.api.metaforge import MetaForgeAPI
 from src.api.ardb import ARDBApi
+from src.api.raidtheory import RaidTheoryClient
 from src.core.config import Config
 from src.core.hotkeys import HotkeyManager
+from src.core.worker import Worker
 from src.ui.event_timer import EventTimerTab
 from src.ui.item_lookup import ItemLookupTab
 from src.ui.map_viewer import MapViewerTab
@@ -40,13 +42,16 @@ class MainWindow(QMainWindow):
         config: Config,
         metaforge: MetaForgeAPI,
         ardb: ARDBApi,
+        rt: RaidTheoryClient,
         hotkeys: HotkeyManager,
     ):
         super().__init__()
         self._config = config
         self._metaforge = metaforge
         self._ardb = ardb
+        self._rt = rt
         self._hotkeys = hotkeys
+        self._enrich_worker: Worker | None = None  # prevent GC during async enrich
 
         self.setWindowTitle("Arc Raiders Overlay")
         self.resize(900, 600)
@@ -154,7 +159,7 @@ class MainWindow(QMainWindow):
             self._scan_name_signal.emit("\x00__UNAVAILABLE__")
 
     def _on_scan_name(self, name: str) -> None:
-        """Runs on main thread. Find the item and show the result popup."""
+        """Runs on main thread. Find the item, fetch RT enrichment, show popup."""
         if name == "\x00__UNAVAILABLE__":
             QMessageBox.information(
                 self,
@@ -169,9 +174,23 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # Find best matching item in the cached items list
         item = self._find_item_by_name(name)
-        self._scan_popup.show_item(item, name)
+
+        # Fetch RT enrichment in background (may make one HTTP request if item
+        # not yet cached) then show the popup with full data on the main thread.
+        def _do_enrich():
+            quests = self._needed_tab.cached_quests
+            return self._rt.enrich(name, quests)
+
+        def _on_enrichment(enrichment: object) -> None:
+            self._scan_popup.show_item(item, name, enrichment if isinstance(enrichment, dict) else None)
+
+        self._enrich_worker = Worker(_do_enrich)
+        self._enrich_worker.finished.connect(_on_enrichment)
+        self._enrich_worker.error.connect(
+            lambda _: self._scan_popup.show_item(item, name, None)
+        )
+        self._enrich_worker.start()
 
     def _find_item_by_name(self, name: str) -> dict | None:
         """Case-insensitive name match against the cached items list."""

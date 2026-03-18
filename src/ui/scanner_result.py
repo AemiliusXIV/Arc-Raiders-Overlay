@@ -1,16 +1,16 @@
 """Item scanner result popup — shown after an OCR scan.
 
-Displays a rich item card (name, rarity, type, sell value, stats, workbench)
+Displays a rich item card (name, rarity, type, sell value, stats, workbench,
+recycle/salvage output, trader prices, crafting uses, quest requirements)
 as a frameless always-on-top window. Styled to match the dark game aesthetic.
 """
 
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QColor, QFont, QPainter, QPen
+from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QHBoxLayout, QLabel, QPushButton, QScrollArea,
-    QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
 )
 
 # ---------------------------------------------------------------------------
@@ -97,6 +97,13 @@ def _value_row(label: str, value: str, value_color: str = "#e0e0e0") -> QWidget:
     return row
 
 
+def _bullet(text: str, color: str = "#c0c0c0") -> QLabel:
+    lbl = QLabel(f"• {text}")
+    lbl.setStyleSheet(f"color: {color}; font-size: 11px;")
+    lbl.setWordWrap(True)
+    return lbl
+
+
 # ---------------------------------------------------------------------------
 # Main popup widget
 # ---------------------------------------------------------------------------
@@ -104,7 +111,7 @@ def _value_row(label: str, value: str, value_color: str = "#e0e0e0") -> QWidget:
 class ScannerResultWindow(QWidget):
     """Rich item detail card shown after OCR scan."""
 
-    _WIDTH = 380
+    _WIDTH = 400
     _AUTO_CLOSE_MS = 15_000  # auto-close after 15 seconds of inactivity
 
     def __init__(self, parent=None):
@@ -152,14 +159,19 @@ class ScannerResultWindow(QWidget):
     # Public API
     # ------------------------------------------------------------------
 
-    def show_item(self, item: dict | None, queried_name: str) -> None:
+    def show_item(
+        self,
+        item: dict | None,
+        queried_name: str,
+        enrichment: dict | None = None,
+    ) -> None:
         """Populate and display the result card."""
         self._clear()
 
-        if item is None:
+        if item is None and (not enrichment or not enrichment.get("rt_item")):
             self._build_not_found(queried_name)
         else:
-            self._build_item(item)
+            self._build_item(item, enrichment)
 
         self.adjustSize()
         self._position()
@@ -184,18 +196,24 @@ class ScannerResultWindow(QWidget):
         lbl.setWordWrap(True)
         self._card_layout.addWidget(lbl)
 
-    def _build_item(self, item: dict) -> None:
-        name = item.get("name") or "Unknown"
-        rarity = item.get("rarity") or ""
-        item_type = item.get("item_type") or ""
-        subcategory = item.get("subcategory") or ""
-        description = item.get("description") or ""
-        value = item.get("value")
-        workbench = item.get("workbench") or ""
-        stat_block = item.get("stat_block") or {}
-        icon_url = item.get("icon") or ""
+    def _build_item(self, item: dict | None, enrichment: dict | None) -> None:
+        mf = item or {}
+        rt = (enrichment or {}).get("rt_item") or {}
 
-        # Header row (name + rarity badge + close button)
+        name        = mf.get("name") or _en_name_from_rt(rt) or "Unknown"
+        rarity      = mf.get("rarity") or rt.get("rarity") or ""
+        item_type   = mf.get("item_type") or rt.get("type") or ""
+        subcategory = mf.get("subcategory") or ""
+        description = mf.get("description") or _rt_desc(rt) or ""
+        value       = mf.get("value") or rt.get("value")
+        workbench   = mf.get("workbench") or rt.get("craftBench") or ""
+        stat_block  = mf.get("stat_block") or {}
+        weight_rt   = rt.get("weightKg")
+        stack_rt    = rt.get("stackSize")
+
+        e = enrichment or {}
+
+        # Header (name + rarity badge + close)
         self._card_layout.addWidget(self._header_row(name, rarity))
 
         # Type / subcategory line
@@ -212,53 +230,111 @@ class ScannerResultWindow(QWidget):
             desc.setStyleSheet("color: #777; font-size: 11px; font-style: italic; margin-top: 4px;")
             self._card_layout.addWidget(desc)
 
-        # --- Values section ---
+        # ----------------------------------------------------------------
+        # Value section
+        # ----------------------------------------------------------------
         self._card_layout.addWidget(_section_label("Value"))
 
         if value is not None:
             self._card_layout.addWidget(
-                _value_row("Sell Value", f"{int(value):,}", "#f0c040")
+                _value_row("Sell Value", f"{int(value):,} cr", "#f0c040")
             )
 
-        # Weight + stack size from stat_block
-        weight = stat_block.get("weight")
-        stack = stat_block.get("stackSize")
+        # Weight + stack size (MetaForge stat_block first, then RT fallback)
+        weight = stat_block.get("weight") or weight_rt
+        stack  = stat_block.get("stackSize") or stack_rt
         if weight:
-            self._card_layout.addWidget(_value_row("Weight", _fmt_number(weight)))
+            self._card_layout.addWidget(_value_row("Weight", f"{_fmt_number(weight)} kg"))
         if stack and int(stack) > 1:
             self._card_layout.addWidget(_value_row("Stack Size", str(int(stack))))
 
-        # --- Notable stats ---
+        # ----------------------------------------------------------------
+        # Notable stats
+        # ----------------------------------------------------------------
         stat_rows = []
         for key, label in STAT_LABELS.items():
             if key in ("weight", "stackSize"):
-                continue  # already shown above
+                continue
             v = stat_block.get(key)
             if v and float(v) != 0:
                 stat_rows.append((label, _fmt_number(v)))
 
         if stat_rows:
             self._card_layout.addWidget(_section_label("Stats"))
-            for label, val in stat_rows[:8]:  # cap at 8 to keep popup manageable
+            for label, val in stat_rows[:8]:
                 self._card_layout.addWidget(_value_row(label, val))
 
-        # --- Workbench ---
+        # ----------------------------------------------------------------
+        # Recycle / salvage output
+        # ----------------------------------------------------------------
+        recycle = e.get("recycle") or []
+        salvage = e.get("salvage") or []
+
+        if recycle or salvage:
+            self._card_layout.addWidget(_section_label("Recycle Output"))
+            for entry in recycle:
+                self._card_layout.addWidget(
+                    _bullet(f"{entry['qty']}× {entry['name']}", "#80cbc4")
+                )
+            for entry in salvage:
+                self._card_layout.addWidget(
+                    _bullet(f"{entry['qty']}× {entry['name']} (salvage)", "#80cbc4")
+                )
+
+        # ----------------------------------------------------------------
+        # Trader prices
+        # ----------------------------------------------------------------
+        traders = e.get("traders") or []
+        if traders:
+            self._card_layout.addWidget(_section_label("Sold By"))
+            for t in traders:
+                limit_txt = f"  (limit {t['daily_limit']}/day)" if t.get("daily_limit") else ""
+                cost_txt = f"{t['cost_qty']:,}× {t['cost_item']}" if t.get("cost_qty") else "?"
+                qty_txt = f"{t['qty']}× " if t.get("qty", 1) > 1 else ""
+                line = f"{t['trader']}  —  {qty_txt}{cost_txt}{limit_txt}"
+                self._card_layout.addWidget(_bullet(line, "#ffcc80"))
+
+        # ----------------------------------------------------------------
+        # Used in (crafting)
+        # ----------------------------------------------------------------
+        used_in = e.get("used_in") or []
+        if used_in:
+            self._card_layout.addWidget(_section_label("Used In"))
+            for u in used_in[:6]:
+                bench = f"  [{u['bench']}]" if u.get("bench") else ""
+                self._card_layout.addWidget(_bullet(f"{u['name']}{bench}", "#ce93d8"))
+
+        # ----------------------------------------------------------------
+        # Workbench (crafting location for this item itself)
+        # ----------------------------------------------------------------
         if workbench:
             self._card_layout.addWidget(_section_label("Crafting"))
             wb_lbl = QLabel(f"Workbench: {workbench}")
             wb_lbl.setStyleSheet("color: #c0c0c0; font-size: 12px;")
             self._card_layout.addWidget(wb_lbl)
 
-        # --- Sources / Locations ---
-        sources = item.get("sources")
+        # ----------------------------------------------------------------
+        # Quest requirements
+        # ----------------------------------------------------------------
+        quests = e.get("quests") or []
+        if quests:
+            self._card_layout.addWidget(_section_label("Required By Quests"))
+            for q in quests[:6]:
+                trader_txt = f"  ({q['trader']})" if q.get("trader") else ""
+                self._card_layout.addWidget(_bullet(f"{q['name']}{trader_txt}", "#ef9a9a"))
+
+        # ----------------------------------------------------------------
+        # Sources / Locations (MetaForge)
+        # ----------------------------------------------------------------
+        sources = mf.get("sources")
         if sources and isinstance(sources, list) and sources:
             self._card_layout.addWidget(_section_label("Sources"))
             for src in sources[:5]:
-                src_lbl = QLabel(f"• {src}" if isinstance(src, str) else f"• {src}")
-                src_lbl.setStyleSheet("color: #c0c0c0; font-size: 11px;")
-                self._card_layout.addWidget(src_lbl)
+                self._card_layout.addWidget(
+                    _bullet(src if isinstance(src, str) else str(src))
+                )
 
-        # Separator + close hint
+        # Close hint
         hint = QLabel("Click × or wait 15s to close")
         hint.setStyleSheet("color: #444; font-size: 10px; margin-top: 6px;")
         hint.setAlignment(Qt.AlignmentFlag.AlignRight)
@@ -308,7 +384,6 @@ class ScannerResultWindow(QWidget):
         if not screen:
             return
         rect = screen.availableGeometry()
-        # Top-right, below where the in-game overlay sits (offset by 200px)
         x = rect.right() - self._WIDTH - 10
         y = rect.top() + 200
         self.move(x, y)
@@ -322,3 +397,21 @@ class ScannerResultWindow(QWidget):
 
     def leaveEvent(self, event) -> None:  # noqa: N802
         self._timer.start(self._AUTO_CLOSE_MS)
+
+
+# ---------------------------------------------------------------------------
+# RT item helpers (used when MetaForge item is None)
+# ---------------------------------------------------------------------------
+
+def _en_name_from_rt(rt: dict) -> str:
+    name = rt.get("name", {})
+    if isinstance(name, dict):
+        return name.get("en", "")
+    return str(name) if name else ""
+
+
+def _rt_desc(rt: dict) -> str:
+    desc = rt.get("description", {})
+    if isinstance(desc, dict):
+        return desc.get("en", "")
+    return str(desc) if desc else ""

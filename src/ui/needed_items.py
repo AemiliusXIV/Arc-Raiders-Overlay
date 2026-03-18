@@ -20,6 +20,7 @@ class NeededItemsTab(QWidget):
         self._config = config
         self._metaforge = metaforge
         self._totals: dict[str, dict] = {}  # slug → {name, total, quests}
+        self._raw_quests: list[dict] = []   # full quest list for cross-referencing
         self._worker: Worker | None = None
 
         self._build_ui()
@@ -63,6 +64,11 @@ class NeededItemsTab(QWidget):
     # Fetch
     # ------------------------------------------------------------------
 
+    @property
+    def cached_quests(self) -> list[dict]:
+        """Raw quest list from MetaForge — used by RT enrichment for quest cross-referencing."""
+        return self._raw_quests
+
     def _fetch(self) -> dict:
         quests = self._metaforge.get_quests()
         totals: dict[str, dict] = {}
@@ -84,7 +90,7 @@ class NeededItemsTab(QWidget):
                 totals[slug]["total"] += qty
                 if quest_name not in totals[slug]["quests"]:
                     totals[slug]["quests"].append(quest_name)
-        return totals
+        return {"totals": totals, "raw_quests": quests}
 
     def _start_fetch(self) -> None:
         self._worker = Worker(self._fetch)
@@ -96,11 +102,12 @@ class NeededItemsTab(QWidget):
         self._metaforge._client.invalidate("https://metaforge.app/api/arc-raiders/quests")
         self._start_fetch()
 
-    def _on_data_ready(self, totals: object) -> None:
-        if not isinstance(totals, dict):
+    def _on_data_ready(self, result: object) -> None:
+        if not isinstance(result, dict):
             return
-        self._totals = totals
-        self._status_label.setText(f"{len(totals)} item(s) needed across all quests")
+        self._raw_quests = result.get("raw_quests") or []
+        self._totals = result.get("totals") or {}
+        self._status_label.setText(f"{len(self._totals)} item(s) needed across all quests")
         self._populate_table()
 
     def _on_error(self, msg: str) -> None:
