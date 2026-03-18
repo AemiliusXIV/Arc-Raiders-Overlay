@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, pyqtSignal
+import threading
+
+from PyQt6.QtCore import Qt, QEvent, pyqtSignal
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
     QMainWindow,
@@ -51,11 +53,16 @@ class MainWindow(QMainWindow):
         self._ardb = ardb
         self._rt = rt
         self._hotkeys = hotkeys
-        self._enrich_worker: Worker | None = None  # prevent GC during async enrich
+        self._active_workers: set[Worker] = set()  # keep refs until threads finish
 
         self.setWindowTitle("Arc Raiders Overlay")
         self.resize(900, 600)
         self._apply_always_on_top(config.always_on_top)
+
+        # Prevents concurrent OCR scans: OCR is slow (~2s) and the keyboard
+        # library may fire callbacks from a background thread. If the lock is
+        # already held the new hotkey press is silently dropped.
+        self._scan_lock = threading.Lock()
 
         self._tabs = QTabWidget()
         self.setCentralWidget(self._tabs)
@@ -150,16 +157,32 @@ class MainWindow(QMainWindow):
         return True, ""
 
     def _ocr_trigger(self) -> None:
-        """Called from keyboard-library thread — must not touch Qt widgets directly."""
-        scanner = ItemScanner(on_result=lambda name: self._scan_name_signal.emit(name))
-        if scanner.available:
-            scanner.scan()
-        else:
-            # Signal the main thread to show the setup dialog
-            self._scan_name_signal.emit("\x00__UNAVAILABLE__")
+        """Called from the keyboard-library thread — must not touch Qt widgets.
+
+        Acquires a non-blocking lock so that a second hotkey press while a scan
+        is already running is silently ignored rather than starting a concurrent
+        scan that could corrupt shared state.
+        """
+        if not self._scan_lock.acquire(blocking=False):
+            print("[Scanner] Scan already in progress — hotkey ignored")
+            return
+        try:
+            scanner = ItemScanner(on_result=lambda name: self._scan_name_signal.emit(name))
+            if scanner.available:
+                scanner.scan()
+            else:
+                self._scan_name_signal.emit("\x00__UNAVAILABLE__")
+        except Exception as exc:
+            print(f"[Scanner] Unexpected error in OCR trigger: {exc}")
+            try:
+                self._scan_name_signal.emit("\x00__ERROR__")
+            except Exception:
+                pass
+        finally:
+            self._scan_lock.release()
 
     def _on_scan_name(self, name: str) -> None:
-        """Runs on main thread. Find the item, fetch RT enrichment, show popup."""
+        """Runs on the main thread (delivered via queued signal from OCR thread)."""
         if name == "\x00__UNAVAILABLE__":
             QMessageBox.information(
                 self,
@@ -174,47 +197,112 @@ class MainWindow(QMainWindow):
             )
             return
 
-        item = self._find_item_by_name(name)
+        if name in ("\x00__ERROR__", "\x00__NO_RESULT__"):
+            self._scan_popup.show_item(None, "scan error", None)
+            return
 
-        # Fetch RT enrichment in background (may make one HTTP request if item
-        # not yet cached) then show the popup with full data on the main thread.
-        def _do_enrich():
+        try:
+            item = self._find_item_by_name(name)
+        except Exception as exc:
+            print(f"[Scanner] Error looking up item: {exc}")
+            item = None
+
+        # Fetch RT enrichment in a Worker; Worker._Signals lives in the main
+        # thread so finished/error are always delivered to the main thread via
+        # Qt's queued-connection mechanism — safe to update UI from the slots.
+        try:
             quests = self._needed_tab.cached_quests
-            return self._rt.enrich(name, quests)
+        except Exception:
+            quests = []
+
+        def _do_enrich():
+            try:
+                return self._rt.enrich(name, quests)
+            except Exception as exc:
+                print(f"[Scanner] RT enrichment failed: {exc}")
+                return None
+
+        worker = Worker(_do_enrich)
 
         def _on_enrichment(enrichment: object) -> None:
-            self._scan_popup.show_item(item, name, enrichment if isinstance(enrichment, dict) else None)
+            try:
+                self._scan_popup.show_item(
+                    item, name,
+                    enrichment if isinstance(enrichment, dict) else None,
+                )
+            except Exception as exc:
+                print(f"[Scanner] Error showing result popup: {exc}")
+                try:
+                    self._scan_popup.show_item(None, name, None)
+                except Exception:
+                    pass
+            finally:
+                self._active_workers.discard(worker)
 
-        self._enrich_worker = Worker(_do_enrich)
-        self._enrich_worker.finished.connect(_on_enrichment)
-        self._enrich_worker.error.connect(
-            lambda _: self._scan_popup.show_item(item, name, None)
-        )
-        self._enrich_worker.start()
+        def _on_enrich_error(msg: str) -> None:
+            print(f"[Scanner] Enrichment worker error: {msg}")
+            try:
+                self._scan_popup.show_item(item, name, None)
+            except Exception as exc:
+                print(f"[Scanner] Error showing fallback popup: {exc}")
+            finally:
+                self._active_workers.discard(worker)
+
+        worker.finished.connect(_on_enrichment)
+        worker.error.connect(_on_enrich_error)
+        self._active_workers.add(worker)
+        worker.start()
 
     def _find_item_by_name(self, name: str) -> dict | None:
-        """Case-insensitive name match against the cached items list."""
+        """
+        Case-insensitive name match against the cached items list.
+
+        `name` may be a newline-separated list of OCR candidates (produced by
+        the scanner when the tooltip contains multiple ALL-CAPS groups). Each
+        candidate is tried in order; the first database hit is returned so that
+        loot-location descriptors ("TOPSIDE MATERIAL") are automatically skipped
+        when they don't match any real item.
+        """
         items = self._item_tab.cached_items
         if not items:
+            print("[Match] Item cache is empty — Items tab may not have loaded yet")
             return None
-        query = name.strip().lower()
-        # Exact match first
+
+        candidates = [c.strip() for c in name.strip().split("\n") if c.strip()]
+        print(f"[Match] Trying {len(candidates)} candidate(s) against {len(items)} items: {candidates}")
+
+        for candidate in candidates:
+            result = self._match_single(candidate, items)
+            if result:
+                print(f"[Match] Matched {repr(candidate)} → {result.get('name')!r}")
+                return result
+
+        print(f"[Match] No match found for any candidate")
+        return None
+
+    def _match_single(self, query_raw: str, items: list[dict]) -> dict | None:
+        """Try exact → contains → word-overlap match for a single query string."""
+        query = query_raw.strip().lower()
+        # Exact
         for item in items:
             if (item.get("name") or "").lower() == query:
                 return item
-        # Contains match
+        # Contains
         for item in items:
             if query in (item.get("name") or "").lower():
                 return item
-        # Partial word overlap
+        # Word overlap (require ≥2 words matching to avoid false positives on
+        # single generic words like "MATERIAL" or "ARC")
         query_words = set(query.split())
+        if len(query_words) < 2:
+            return None
         best, best_score = None, 0
         for item in items:
             item_words = set((item.get("name") or "").lower().split())
             score = len(query_words & item_words)
             if score > best_score:
                 best, best_score = item, score
-        return best if best_score > 0 else None
+        return best if best_score >= 2 else None
 
     # ------------------------------------------------------------------
     # Menu bar
@@ -227,6 +315,11 @@ class MainWindow(QMainWindow):
         self._aot_action.setChecked(self._config.always_on_top)
         self._aot_action.toggled.connect(self._on_always_on_top_toggled)
         view_menu.addAction(self._aot_action)
+
+        self._hide_on_blur_action = QAction("Hide When Unfocused", self, checkable=True)
+        self._hide_on_blur_action.setChecked(self._config.hide_on_focus_loss)
+        self._hide_on_blur_action.toggled.connect(self._on_hide_on_blur_toggled)
+        view_menu.addAction(self._hide_on_blur_action)
 
         self._overlay_action = QAction("Show In-Game Overlay", self, checkable=True)
         self._overlay_action.setChecked(False)
@@ -292,6 +385,17 @@ class MainWindow(QMainWindow):
     def _on_always_on_top_toggled(self, checked: bool) -> None:
         self._config.always_on_top = checked
         self._apply_always_on_top(checked)
+
+    def _on_hide_on_blur_toggled(self, checked: bool) -> None:
+        self._config.hide_on_focus_loss = checked
+
+    def changeEvent(self, event: QEvent) -> None:
+        if (
+            event.type() == QEvent.Type.WindowDeactivate
+            and self._config.hide_on_focus_loss
+        ):
+            self.hide()
+        super().changeEvent(event)
 
     # ------------------------------------------------------------------
     # Overlay toggle

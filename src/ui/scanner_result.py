@@ -236,8 +236,12 @@ class ScannerResultWindow(QWidget):
         self._card_layout.addWidget(_section_label("Value"))
 
         if value is not None:
+            try:
+                value_str = f"{int(float(value)):,} cr"
+            except (TypeError, ValueError):
+                value_str = f"{value} cr"
             self._card_layout.addWidget(
-                _value_row("Sell Value", f"{int(value):,} cr", "#f0c040")
+                _value_row("Sell Value", value_str, "#f0c040")
             )
 
         # Weight + stack size (MetaForge stat_block first, then RT fallback)

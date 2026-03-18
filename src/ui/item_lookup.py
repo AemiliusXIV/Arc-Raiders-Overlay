@@ -171,7 +171,7 @@ class ItemLookupTab(QWidget):
         self._worker.start()
 
     def _force_refresh(self) -> None:
-        self._metaforge._client.invalidate("https://metaforge.app/api/arc-raiders/items")
+        self._metaforge._client.invalidate("https://metaforge.app/api/arc-raiders/items?all")
         self._start_fetch()
 
     def _on_data_ready(self, items: object) -> None:

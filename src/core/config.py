@@ -10,6 +10,7 @@ DEFAULTS: dict = {
     "alert_seconds_before": [60, 300],
     "volume": 0.7,
     "always_on_top": True,
+    "hide_on_focus_loss": False,
     "default_map": "Dam",
     "hotkey_scan": "alt+x",
     "hotkey_overlay": "alt+z",
@@ -77,6 +78,14 @@ class Config:
     @always_on_top.setter
     def always_on_top(self, value: bool) -> None:
         self.set("always_on_top", bool(value))
+
+    @property
+    def hide_on_focus_loss(self) -> bool:
+        return bool(self._data.get("hide_on_focus_loss", DEFAULTS["hide_on_focus_loss"]))
+
+    @hide_on_focus_loss.setter
+    def hide_on_focus_loss(self, value: bool) -> None:
+        self.set("hide_on_focus_loss", bool(value))
 
     @property
     def default_map(self) -> str:
