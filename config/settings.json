@@ -1,0 +1,19 @@
+{
+  "alert_seconds_before": [
+    60,
+    300
+  ],
+  "volume": 0.7,
+  "always_on_top": true,
+  "default_map": "Buried City",
+  "hotkey_scan": "alt+x",
+  "hotkey_overlay": "alt+z",
+  "window_geometry": null,
+  "overlay_position": null,
+  "overlay_visible": false,
+  "tracked_quests": [],
+  "collected_items": {},
+  "completed_upgrades": [],
+  "found_blueprints": [],
+  "completed_trials": {}
+}
