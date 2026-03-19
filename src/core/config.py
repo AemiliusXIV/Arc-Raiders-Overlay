@@ -22,6 +22,11 @@ DEFAULTS: dict = {
     "completed_upgrades": [],
     "found_blueprints": [],
     "completed_trials": {},
+    "map_source": "ArcMaps.com",
+    "hotkey_minimap": "alt+m",
+    "minimap_position": None,
+    "minimap_size": None,
+    "minimap_opacity": 0.85,
 }
 
 
@@ -166,3 +171,43 @@ class Config:
     @completed_trials.setter
     def completed_trials(self, value: dict) -> None:
         self.set("completed_trials", value)
+
+    @property
+    def map_source(self) -> str:
+        return self._data.get("map_source", DEFAULTS["map_source"])
+
+    @map_source.setter
+    def map_source(self, value: str) -> None:
+        self.set("map_source", value)
+
+    @property
+    def hotkey_minimap(self) -> str:
+        return self._data.get("hotkey_minimap", DEFAULTS["hotkey_minimap"])
+
+    @hotkey_minimap.setter
+    def hotkey_minimap(self, value: str) -> None:
+        self.set("hotkey_minimap", value)
+
+    @property
+    def minimap_position(self) -> list | None:
+        return self._data.get("minimap_position", None)
+
+    @minimap_position.setter
+    def minimap_position(self, value: list | None) -> None:
+        self.set("minimap_position", value)
+
+    @property
+    def minimap_size(self) -> list | None:
+        return self._data.get("minimap_size", None)
+
+    @minimap_size.setter
+    def minimap_size(self, value: list | None) -> None:
+        self.set("minimap_size", value)
+
+    @property
+    def minimap_opacity(self) -> float:
+        return float(self._data.get("minimap_opacity", DEFAULTS["minimap_opacity"]))
+
+    @minimap_opacity.setter
+    def minimap_opacity(self, value: float) -> None:
+        self.set("minimap_opacity", max(0.2, min(1.0, float(value))))

@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
     QApplication,
 )
 
+from src.__version__ import __version__
 from src.api.metaforge import MetaForgeAPI
 from src.api.ardb import ARDBApi
 from src.api.raidtheory import RaidTheoryClient
@@ -29,6 +30,7 @@ from src.ui.needed_items import NeededItemsTab
 from src.ui.hideout_tracker import HideoutTab
 from src.ui.blueprint_tracker import BlueprintTab
 from src.ui.weekly_trials import WeeklyTrialsTab
+from src.ui.minimap_overlay import MinimapOverlay
 from src.ui.overlay import OverlayWindow
 from src.ui.scanner_result import ScannerResultWindow
 from src.ui.settings_dialog import SettingsDialog
@@ -55,7 +57,7 @@ class MainWindow(QMainWindow):
         self._hotkeys = hotkeys
         self._active_workers: set[Worker] = set()  # keep refs until threads finish
 
-        self.setWindowTitle("Arc Raiders Overlay")
+        self.setWindowTitle(f"Arc Raiders Overlay  v{__version__}")
         self.resize(900, 600)
         self._apply_always_on_top(config.always_on_top)
 
@@ -72,7 +74,7 @@ class MainWindow(QMainWindow):
         self._map_tab = MapViewerTab(config, metaforge)
         self._quest_tab = QuestTrackerTab(config, metaforge, ardb)
         self._needed_tab = NeededItemsTab(config, metaforge)
-        self._hideout_tab = HideoutTab(config, metaforge)
+        self._hideout_tab = HideoutTab(config, rt)
         self._blueprint_tab = BlueprintTab(config, metaforge, ardb)
         self._trials_tab = WeeklyTrialsTab(config, metaforge)
 
@@ -88,6 +90,10 @@ class MainWindow(QMainWindow):
         # In-game overlay — created hidden; toggled by Alt+Z hotkey
         self._overlay = OverlayWindow(config)
         self._event_tab.events_loaded.connect(self._overlay.update_events)
+
+        # Minimap overlay — created hidden; toggled by Alt+M hotkey
+        self._minimap = MinimapOverlay(config)
+        self._map_tab.url_changed.connect(self._minimap.load_url)
 
         # Scanner result popup — shown after OCR scan
         self._scan_popup = ScannerResultWindow()
@@ -128,13 +134,21 @@ class MainWindow(QMainWindow):
         else:
             print(f"[Hotkeys] Failed to bind overlay toggle to {self._config.hotkey_overlay}")
 
-    def _rebind_hotkeys(self, new_scan: str, new_overlay: str) -> tuple[bool, str]:
+        if self._hotkeys.register(self._config.hotkey_minimap, self.toggle_minimap):
+            print(f"[Hotkeys] Minimap toggle bound to: {self._config.hotkey_minimap}")
+        else:
+            print(f"[Hotkeys] Failed to bind minimap toggle to {self._config.hotkey_minimap}")
+
+    def _rebind_hotkeys(
+        self, new_scan: str, new_overlay: str, new_minimap: str
+    ) -> tuple[bool, str]:
         """Unregister old hotkeys, apply new ones. Returns (success, error_msg)."""
         if not self._hotkeys.available:
             return False, "keyboard library not available"
 
         self._hotkeys.unregister(self._config.hotkey_scan)
         self._hotkeys.unregister(self._config.hotkey_overlay)
+        self._hotkeys.unregister(self._config.hotkey_minimap)
 
         errors = []
         if new_scan:
@@ -142,7 +156,6 @@ class MainWindow(QMainWindow):
                 self._config.hotkey_scan = new_scan
             else:
                 errors.append(f"Could not bind item scanner to '{new_scan}'")
-                # Restore old binding
                 self._hotkeys.register(self._config.hotkey_scan, self._ocr_trigger)
 
         if new_overlay:
@@ -151,6 +164,13 @@ class MainWindow(QMainWindow):
             else:
                 errors.append(f"Could not bind overlay toggle to '{new_overlay}'")
                 self._hotkeys.register(self._config.hotkey_overlay, self.toggle_overlay)
+
+        if new_minimap:
+            if self._hotkeys.register(new_minimap, self.toggle_minimap):
+                self._config.hotkey_minimap = new_minimap
+            else:
+                errors.append(f"Could not bind minimap toggle to '{new_minimap}'")
+                self._hotkeys.register(self._config.hotkey_minimap, self.toggle_minimap)
 
         if errors:
             return False, "\n".join(errors)
@@ -414,6 +434,11 @@ class MainWindow(QMainWindow):
         self._overlay_action.toggled.connect(self._on_overlay_toggled)
         view_menu.addAction(self._overlay_action)
 
+        self._minimap_action = QAction("Show Minimap Overlay", self, checkable=True)
+        self._minimap_action.setChecked(False)
+        self._minimap_action.toggled.connect(self._on_minimap_toggled)
+        view_menu.addAction(self._minimap_action)
+
         minimize_action = QAction("Minimize to Tray", self)
         minimize_action.triggered.connect(self.hide)
         view_menu.addAction(minimize_action)
@@ -499,6 +524,19 @@ class MainWindow(QMainWindow):
         self._overlay_action.setChecked(visible)
 
     # ------------------------------------------------------------------
+    # Minimap overlay toggle
+    # ------------------------------------------------------------------
+
+    def _on_minimap_toggled(self, checked: bool) -> None:
+        self._minimap.setVisible(checked)
+
+    def toggle_minimap(self) -> None:
+        """Toggle minimap visibility (called from hotkey or menu)."""
+        visible = not self._minimap.isVisible()
+        self._minimap.setVisible(visible)
+        self._minimap_action.setChecked(visible)
+
+    # ------------------------------------------------------------------
     # Settings dialog
     # ------------------------------------------------------------------
 
@@ -506,14 +544,20 @@ class MainWindow(QMainWindow):
         dlg = SettingsDialog(
             self._config.hotkey_scan,
             self._config.hotkey_overlay,
+            self._config.hotkey_minimap,
+            self._config.minimap_opacity,
             parent=self,
         )
         if dlg.exec() != SettingsDialog.DialogCode.Accepted:
             return
 
-        ok, err = self._rebind_hotkeys(dlg.scan_hotkey, dlg.overlay_hotkey)
+        ok, err = self._rebind_hotkeys(
+            dlg.scan_hotkey, dlg.overlay_hotkey, dlg.minimap_hotkey
+        )
         if not ok:
             QMessageBox.warning(self, "Hotkey Error", err)
+
+        self._minimap.set_opacity(dlg.minimap_opacity)
 
     # ------------------------------------------------------------------
     # Public helpers used by hotkey / OCR

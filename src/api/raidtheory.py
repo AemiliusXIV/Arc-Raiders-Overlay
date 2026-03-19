@@ -219,6 +219,55 @@ class RaidTheoryClient:
             return list(self._used_in.get(rt_id, []))
 
     # ------------------------------------------------------------------
+    # Hideout stations
+    # ------------------------------------------------------------------
+
+    # Ordered as they appear in-game
+    _HIDEOUT_FILES = [
+        "scrappy", "stash", "equipment_bench", "weapon_bench",
+        "med_station", "refiner", "explosives_bench", "utility_bench",
+    ]
+
+    def get_hideout_stations(self) -> list[dict]:
+        """Fetch all hideout station upgrade data from the RT dataset.
+
+        Returns a list of station dicts::
+
+            {
+                "id":     str,
+                "name":   str,
+                "levels": [{"level": int, "materials": [{"name": str, "qty": int}],
+                            "other": [str], "description": str}, ...]
+            }
+
+        Stations with no levels (e.g. workbench not yet in dataset) are skipped.
+        """
+        stations = []
+        for station_id in self._HIDEOUT_FILES:
+            data = _get_json(f"{_RAW}/hideout/{station_id}.json")
+            if not data or not data.get("levels"):
+                continue
+            name_raw = data.get("name", {})
+            name = (
+                name_raw.get("en") if isinstance(name_raw, dict) else str(name_raw)
+            ) or station_id.replace("_", " ").title()
+            levels = []
+            for lv in data["levels"]:
+                materials = [
+                    {"name": self.get_item_name(r["itemId"]), "qty": r.get("quantity", 1)}
+                    for r in (lv.get("requirementItemIds") or [])
+                    if r.get("itemId")
+                ]
+                levels.append({
+                    "level":       lv.get("level", 0),
+                    "materials":   materials,
+                    "other":       [str(o) for o in (lv.get("otherRequirements") or [])],
+                    "description": lv.get("description", ""),
+                })
+            stations.append({"id": station_id, "name": name, "levels": levels})
+        return stations
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 

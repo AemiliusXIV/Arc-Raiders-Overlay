@@ -5,7 +5,8 @@
   ],
   "volume": 0.7,
   "always_on_top": true,
-  "default_map": "Buried City",
+  "hide_on_focus_loss": false,
+  "default_map": "Stella Montis",
   "hotkey_scan": "9",
   "hotkey_overlay": "5",
   "window_geometry": null,
@@ -13,7 +14,14 @@
   "overlay_visible": false,
   "tracked_quests": [],
   "collected_items": {},
-  "completed_upgrades": [],
+  "completed_upgrades": [
+    "scrappy_level_2"
+  ],
   "found_blueprints": [],
-  "completed_trials": {}
+  "completed_trials": {},
+  "map_source": "ArcMaps.com",
+  "hotkey_minimap": "alt+m",
+  "minimap_position": null,
+  "minimap_size": null,
+  "minimap_opacity": 0.85
 }

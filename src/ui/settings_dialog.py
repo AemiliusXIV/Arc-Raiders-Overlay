@@ -6,8 +6,10 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QKeyEvent, QKeySequence
 from PyQt6.QtWidgets import (
     QDialog, QDialogButtonBox, QFormLayout, QGroupBox,
-    QLabel, QLineEdit, QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QLineEdit, QSlider, QVBoxLayout, QWidget,
 )
+
+from src.__version__ import __version__
 
 
 class HotkeyEdit(QLineEdit):
@@ -57,7 +59,14 @@ class HotkeyEdit(QLineEdit):
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, scan_hotkey: str, overlay_hotkey: str, parent: QWidget | None = None):
+    def __init__(
+        self,
+        scan_hotkey: str,
+        overlay_hotkey: str,
+        minimap_hotkey: str,
+        minimap_opacity: float,
+        parent: QWidget | None = None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.setMinimumWidth(400)
@@ -73,9 +82,11 @@ class SettingsDialog(QDialog):
 
         self._scan_edit = HotkeyEdit(scan_hotkey)
         self._overlay_edit = HotkeyEdit(overlay_hotkey)
+        self._minimap_edit = HotkeyEdit(minimap_hotkey)
 
         form.addRow("Item Scanner:", self._scan_edit)
         form.addRow("Toggle Overlay:", self._overlay_edit)
+        form.addRow("Toggle Minimap:", self._minimap_edit)
 
         hint = QLabel(
             "Click a field and press your desired key combination to record it.\n"
@@ -87,6 +98,27 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(hk_group)
 
+        # Minimap group
+        mm_group = QGroupBox("Minimap")
+        mm_form = QFormLayout(mm_group)
+
+        opacity_row = QHBoxLayout()
+        self._opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self._opacity_slider.setRange(20, 100)
+        self._opacity_slider.setValue(int(minimap_opacity * 100))
+        self._opacity_slider.setToolTip("Minimap overlay opacity")
+        self._opacity_label = QLabel(f"{int(minimap_opacity * 100)}%")
+        self._opacity_label.setFixedWidth(36)
+        self._opacity_slider.valueChanged.connect(
+            lambda v: self._opacity_label.setText(f"{v}%")
+        )
+        opacity_row.addWidget(self._opacity_slider)
+        opacity_row.addWidget(self._opacity_label)
+
+        mm_form.addRow("Opacity:", opacity_row)
+
+        layout.addWidget(mm_group)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save
             | QDialogButtonBox.StandardButton.Cancel
@@ -95,6 +127,11 @@ class SettingsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+        version_lbl = QLabel(f"Arc Raiders Overlay  v{__version__}")
+        version_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        version_lbl.setStyleSheet("color: #555; font-size: 10px; padding-top: 4px;")
+        layout.addWidget(version_lbl)
+
     @property
     def scan_hotkey(self) -> str:
         return self._scan_edit.text().strip()
@@ -102,3 +139,11 @@ class SettingsDialog(QDialog):
     @property
     def overlay_hotkey(self) -> str:
         return self._overlay_edit.text().strip()
+
+    @property
+    def minimap_hotkey(self) -> str:
+        return self._minimap_edit.text().strip()
+
+    @property
+    def minimap_opacity(self) -> float:
+        return self._opacity_slider.value() / 100.0
