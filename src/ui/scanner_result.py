@@ -32,10 +32,8 @@ STAT_LABELS: dict[str, str] = {
     "shield":                  "Shield",
     "healing":                 "Healing",
     "stamina":                 "Stamina",
-    "weight":                  "Weight",
     "useTime":                 "Use Time (s)",
     "duration":                "Duration (s)",
-    "stackSize":               "Stack Size",
     "fireRate":                "Fire Rate",
     "magazineSize":            "Magazine Size",
     "range":                   "Range",
@@ -69,13 +67,23 @@ def _fmt_number(value) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Dark-background label helpers
+# Widget helpers
 # ---------------------------------------------------------------------------
 
 def _section_label(text: str) -> QLabel:
     lbl = QLabel(text.upper())
-    lbl.setStyleSheet("color: #888; font-size: 10px; font-weight: bold; margin-top: 6px;")
+    lbl.setStyleSheet(
+        "color: #666; font-size: 9px; font-weight: bold; "
+        "margin-top: 8px; margin-bottom: 1px; letter-spacing: 1px;"
+    )
     return lbl
+
+
+def _divider() -> QWidget:
+    line = QWidget()
+    line.setFixedHeight(1)
+    line.setStyleSheet("background: #2a2a2a; margin-top: 4px; margin-bottom: 2px;")
+    return line
 
 
 def _value_row(label: str, value: str, value_color: str = "#e0e0e0") -> QWidget:
@@ -104,6 +112,15 @@ def _bullet(text: str, color: str = "#c0c0c0") -> QLabel:
     return lbl
 
 
+def _badge(text: str, fg: str, border: str) -> QLabel:
+    lbl = QLabel(text.upper())
+    lbl.setStyleSheet(
+        f"color: {fg}; font-size: 9px; font-weight: bold; "
+        f"border: 1px solid {border}; border-radius: 3px; padding: 1px 5px;"
+    )
+    return lbl
+
+
 # ---------------------------------------------------------------------------
 # Main popup widget
 # ---------------------------------------------------------------------------
@@ -111,7 +128,7 @@ def _bullet(text: str, color: str = "#c0c0c0") -> QLabel:
 class ScannerResultWindow(QWidget):
     """Rich item detail card shown after OCR scan."""
 
-    _WIDTH = 400
+    _WIDTH = 420
     _AUTO_CLOSE_MS = 15_000  # auto-close after 15 seconds of inactivity
 
     def __init__(self, parent=None):
@@ -134,7 +151,7 @@ class ScannerResultWindow(QWidget):
         self._card.setObjectName("card")
         self._card.setStyleSheet("""
             QWidget#card {
-                background-color: rgba(18, 18, 22, 230);
+                background-color: rgba(18, 18, 22, 235);
                 border: 1px solid #333;
                 border-radius: 10px;
             }
@@ -142,7 +159,7 @@ class ScannerResultWindow(QWidget):
 
         self._card_layout = QVBoxLayout(self._card)
         self._card_layout.setContentsMargins(14, 12, 14, 14)
-        self._card_layout.setSpacing(4)
+        self._card_layout.setSpacing(3)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -189,8 +206,7 @@ class ScannerResultWindow(QWidget):
                 child.widget().deleteLater()
 
     def _build_not_found(self, name: str) -> None:
-        hdr = self._header_row("Item not found", None)
-        self._card_layout.addWidget(hdr)
+        self._card_layout.addWidget(self._header_row("Item not found", None))
         lbl = QLabel(f'"{name}" did not match any item in the database.\nTry scanning again.')
         lbl.setStyleSheet("color: #888; font-size: 12px;")
         lbl.setWordWrap(True)
@@ -199,167 +215,176 @@ class ScannerResultWindow(QWidget):
     def _build_item(self, item: dict | None, enrichment: dict | None) -> None:
         mf = item or {}
         rt = (enrichment or {}).get("rt_item") or {}
+        e  = enrichment or {}
 
-        name        = mf.get("name") or _en_name_from_rt(rt) or "Unknown"
-        rarity      = mf.get("rarity") or rt.get("rarity") or ""
-        item_type   = mf.get("item_type") or rt.get("type") or ""
+        name        = mf.get("name")        or _en_name_from_rt(rt) or "Unknown"
+        rarity      = mf.get("rarity")      or rt.get("rarity")     or ""
+        item_type   = mf.get("item_type")   or rt.get("type")        or ""
         subcategory = mf.get("subcategory") or ""
-        description = mf.get("description") or _rt_desc(rt) or ""
-        value       = mf.get("value") or rt.get("value")
-        workbench   = mf.get("workbench") or rt.get("craftBench") or ""
-        stat_block  = mf.get("stat_block") or {}
-        weight_rt   = rt.get("weightKg")
-        stack_rt    = rt.get("stackSize")
+        description = mf.get("description") or _rt_desc(rt)          or ""
+        value       = mf.get("value")       or rt.get("value")
+        recycle_val = rt.get("recycleValue")
+        workbench   = mf.get("workbench")   or rt.get("craftBench")  or ""
+        stat_block  = mf.get("stat_block")  or {}
+        weight      = stat_block.get("weight") or rt.get("weightKg")
+        stack       = stat_block.get("stackSize") or rt.get("stackSize")
 
-        e = enrichment or {}
+        recycle  = e.get("recycle")  or []
+        salvage  = e.get("salvage")  or []
+        traders  = e.get("traders")  or []
+        used_in  = e.get("used_in")  or []
+        quests   = e.get("quests")   or []
+        # Found-in: prefer RT's location list; fall back to MetaForge sources
+        found_in = e.get("found_in") or mf.get("sources") or []
 
-        # Header (name + rarity badge + close)
-        self._card_layout.addWidget(self._header_row(name, rarity))
+        # ── Header: badges + name + close ────────────────────────────────
+        self._card_layout.addWidget(self._header_row(name, rarity, item_type))
 
-        # Type / subcategory line
-        type_parts = [p for p in (item_type, subcategory) if p]
-        if type_parts:
-            type_lbl = QLabel(" · ".join(type_parts))
-            type_lbl.setStyleSheet("color: #aaa; font-size: 11px;")
-            self._card_layout.addWidget(type_lbl)
+        # Type · subcategory tag line (skip if already shown in header)
+        sub_parts = [p for p in (subcategory,) if p and p.lower() != item_type.lower()]
+        if sub_parts:
+            sub_lbl = QLabel(" · ".join(sub_parts))
+            sub_lbl.setStyleSheet("color: #999; font-size: 10px; margin-top: 1px;")
+            self._card_layout.addWidget(sub_lbl)
 
         # Description
         if description:
             desc = QLabel(description)
             desc.setWordWrap(True)
-            desc.setStyleSheet("color: #777; font-size: 11px; font-style: italic; margin-top: 4px;")
+            desc.setStyleSheet(
+                "color: #777; font-size: 11px; font-style: italic; margin-top: 3px;"
+            )
             self._card_layout.addWidget(desc)
 
-        # ----------------------------------------------------------------
-        # Value section
-        # ----------------------------------------------------------------
-        self._card_layout.addWidget(_section_label("Value"))
-
+        # ── Value ─────────────────────────────────────────────────────────
+        value_rows: list[tuple[str, str, str]] = []
         if value is not None:
             try:
-                value_str = f"{int(float(value)):,} cr"
+                value_rows.append(("Sell Value", f"{int(float(value)):,} cr", "#f0c040"))
             except (TypeError, ValueError):
-                value_str = f"{value} cr"
-            self._card_layout.addWidget(
-                _value_row("Sell Value", value_str, "#f0c040")
-            )
-
-        # Weight + stack size (MetaForge stat_block first, then RT fallback)
-        weight = stat_block.get("weight") or weight_rt
-        stack  = stat_block.get("stackSize") or stack_rt
+                value_rows.append(("Sell Value", f"{value} cr", "#f0c040"))
+        if recycle_val is not None:
+            try:
+                value_rows.append(("Recycle Value", f"{int(float(recycle_val)):,} cr", "#80cbc4"))
+            except (TypeError, ValueError):
+                pass
         if weight:
-            self._card_layout.addWidget(_value_row("Weight", f"{_fmt_number(weight)} kg"))
+            value_rows.append(("Weight", f"{_fmt_number(weight)} kg", "#e0e0e0"))
         if stack and int(stack) > 1:
-            self._card_layout.addWidget(_value_row("Stack Size", str(int(stack))))
+            value_rows.append(("Stack Size", str(int(stack)), "#e0e0e0"))
 
-        # ----------------------------------------------------------------
-        # Notable stats
-        # ----------------------------------------------------------------
+        if value_rows:
+            self._card_layout.addWidget(_divider())
+            self._card_layout.addWidget(_section_label("Value"))
+            for label, val, color in value_rows:
+                self._card_layout.addWidget(_value_row(label, val, color))
+
+        # ── Stats (weapons / armor — only if non-empty) ───────────────────
         stat_rows = []
         for key, label in STAT_LABELS.items():
-            if key in ("weight", "stackSize"):
-                continue
             v = stat_block.get(key)
-            if v and float(v) != 0:
-                stat_rows.append((label, _fmt_number(v)))
-
+            if v:
+                try:
+                    if float(v) != 0:
+                        stat_rows.append((label, _fmt_number(v)))
+                except (TypeError, ValueError):
+                    pass
         if stat_rows:
+            self._card_layout.addWidget(_divider())
             self._card_layout.addWidget(_section_label("Stats"))
             for label, val in stat_rows[:8]:
                 self._card_layout.addWidget(_value_row(label, val))
 
-        # ----------------------------------------------------------------
-        # Recycle / salvage output
-        # ----------------------------------------------------------------
-        recycle = e.get("recycle") or []
-        salvage = e.get("salvage") or []
-
+        # ── Recycles Into ─────────────────────────────────────────────────
         if recycle or salvage:
-            self._card_layout.addWidget(_section_label("Recycle Output"))
+            self._card_layout.addWidget(_divider())
+            self._card_layout.addWidget(_section_label("Recycles Into"))
             for entry in recycle:
                 self._card_layout.addWidget(
-                    _bullet(f"{entry['qty']}× {entry['name']}", "#80cbc4")
+                    _bullet(f"{entry['name']}  ×{entry['qty']}", "#80cbc4")
                 )
             for entry in salvage:
                 self._card_layout.addWidget(
-                    _bullet(f"{entry['qty']}× {entry['name']} (salvage)", "#80cbc4")
+                    _bullet(f"{entry['name']}  ×{entry['qty']}  (salvage)", "#80cbc4")
                 )
 
-        # ----------------------------------------------------------------
-        # Trader prices
-        # ----------------------------------------------------------------
-        traders = e.get("traders") or []
+        # ── Projects (quest / project requirements) ───────────────────────
+        if quests:
+            self._card_layout.addWidget(_divider())
+            self._card_layout.addWidget(_section_label("Projects"))
+            for q in quests[:6]:
+                trader_txt = f"  ({q['trader']})" if q.get("trader") else ""
+                qty_txt    = f"  ×{q['qty']}"    if q.get("qty")    else ""
+                self._card_layout.addWidget(
+                    _bullet(f"{q['name']}{trader_txt}{qty_txt}", "#ef9a9a")
+                )
+
+        # ── Used In (crafting ingredient) ─────────────────────────────────
+        if used_in:
+            self._card_layout.addWidget(_divider())
+            self._card_layout.addWidget(_section_label("Used In"))
+            for u in used_in[:6]:
+                bench = f"  [{u['bench']}]" if u.get("bench") else ""
+                self._card_layout.addWidget(
+                    _bullet(f"{u['name']}{bench}", "#ce93d8")
+                )
+
+        # ── Crafting (workbench for this item itself) ─────────────────────
+        if workbench:
+            self._card_layout.addWidget(_divider())
+            self._card_layout.addWidget(_section_label("Crafting"))
+            self._card_layout.addWidget(_bullet(f"Workbench: {workbench}", "#c0c0c0"))
+
+        # ── Sold By ───────────────────────────────────────────────────────
         if traders:
+            self._card_layout.addWidget(_divider())
             self._card_layout.addWidget(_section_label("Sold By"))
             for t in traders:
                 limit_txt = f"  (limit {t['daily_limit']}/day)" if t.get("daily_limit") else ""
-                cost_txt = f"{t['cost_qty']:,}× {t['cost_item']}" if t.get("cost_qty") else "?"
+                cost_txt  = (
+                    f"{t['cost_qty']:,}× {t['cost_item']}" if t.get("cost_qty") else "?"
+                )
                 qty_txt = f"{t['qty']}× " if t.get("qty", 1) > 1 else ""
                 line = f"{t['trader']}  —  {qty_txt}{cost_txt}{limit_txt}"
                 self._card_layout.addWidget(_bullet(line, "#ffcc80"))
 
-        # ----------------------------------------------------------------
-        # Used in (crafting)
-        # ----------------------------------------------------------------
-        used_in = e.get("used_in") or []
-        if used_in:
-            self._card_layout.addWidget(_section_label("Used In"))
-            for u in used_in[:6]:
-                bench = f"  [{u['bench']}]" if u.get("bench") else ""
-                self._card_layout.addWidget(_bullet(f"{u['name']}{bench}", "#ce93d8"))
-
-        # ----------------------------------------------------------------
-        # Workbench (crafting location for this item itself)
-        # ----------------------------------------------------------------
-        if workbench:
-            self._card_layout.addWidget(_section_label("Crafting"))
-            wb_lbl = QLabel(f"Workbench: {workbench}")
-            wb_lbl.setStyleSheet("color: #c0c0c0; font-size: 12px;")
-            self._card_layout.addWidget(wb_lbl)
-
-        # ----------------------------------------------------------------
-        # Quest requirements
-        # ----------------------------------------------------------------
-        quests = e.get("quests") or []
-        if quests:
-            self._card_layout.addWidget(_section_label("Required By Quests"))
-            for q in quests[:6]:
-                trader_txt = f"  ({q['trader']})" if q.get("trader") else ""
-                self._card_layout.addWidget(_bullet(f"{q['name']}{trader_txt}", "#ef9a9a"))
-
-        # ----------------------------------------------------------------
-        # Sources / Locations (MetaForge)
-        # ----------------------------------------------------------------
-        sources = mf.get("sources")
-        if sources and isinstance(sources, list) and sources:
-            self._card_layout.addWidget(_section_label("Sources"))
-            for src in sources[:5]:
+        # ── Found In ──────────────────────────────────────────────────────
+        if found_in:
+            self._card_layout.addWidget(_divider())
+            self._card_layout.addWidget(_section_label("Found In"))
+            for loc in found_in[:5]:
                 self._card_layout.addWidget(
-                    _bullet(src if isinstance(src, str) else str(src))
+                    _bullet(loc if isinstance(loc, str) else str(loc))
                 )
 
         # Close hint
-        hint = QLabel("Click × or wait 15s to close")
-        hint.setStyleSheet("color: #444; font-size: 10px; margin-top: 6px;")
+        hint = QLabel("× to close  ·  auto-hides in 15s")
+        hint.setStyleSheet("color: #383838; font-size: 9px; margin-top: 8px;")
         hint.setAlignment(Qt.AlignmentFlag.AlignRight)
         self._card_layout.addWidget(hint)
 
-    def _header_row(self, name: str, rarity: str | None) -> QWidget:
+    def _header_row(
+        self,
+        name: str,
+        rarity: str | None,
+        category: str = "",
+    ) -> QWidget:
         row = QWidget()
         row.setStyleSheet("background: transparent;")
         layout = QHBoxLayout(row)
         layout.setContentsMargins(0, 0, 0, 4)
-        layout.setSpacing(6)
+        layout.setSpacing(5)
 
+        # Rarity badge (colour-coded)
         if rarity:
             color = _rarity_color(rarity)
-            badge = QLabel(rarity.upper())
-            badge.setStyleSheet(
-                f"color: {color}; font-size: 10px; font-weight: bold; "
-                f"border: 1px solid {color}; border-radius: 3px; padding: 1px 5px;"
-            )
-            layout.addWidget(badge)
+            layout.addWidget(_badge(rarity, color, color))
 
+        # Category / type badge (teal, distinct from rarity)
+        if category:
+            layout.addWidget(_badge(category, "#80cbc4", "#4db6ac"))
+
+        # Item name
         name_lbl = QLabel(name)
         font = QFont("Segoe UI", 13, QFont.Weight.Bold)
         name_lbl.setFont(font)
@@ -367,10 +392,11 @@ class ScannerResultWindow(QWidget):
         name_lbl.setWordWrap(True)
         layout.addWidget(name_lbl, 1)
 
+        # Close button
         close_btn = QPushButton("×")
         close_btn.setFixedSize(22, 22)
         close_btn.setStyleSheet(
-            "QPushButton { color: #888; background: transparent; border: none; font-size: 16px; }"
+            "QPushButton { color: #666; background: transparent; border: none; font-size: 16px; }"
             "QPushButton:hover { color: #fff; }"
         )
         close_btn.clicked.connect(self.hide)

@@ -162,24 +162,35 @@ class MainWindow(QMainWindow):
         Acquires a non-blocking lock so that a second hotkey press while a scan
         is already running is silently ignored rather than starting a concurrent
         scan that could corrupt shared state.
+
+        The scan itself is dispatched to a *fresh* daemon thread rather than
+        running on the keyboard library's own thread.  mss and pytesseract are
+        not guaranteed to be safe when re-entered on the same long-lived thread,
+        which caused a crash on the second scan.
         """
         if not self._scan_lock.acquire(blocking=False):
             print("[Scanner] Scan already in progress — hotkey ignored")
             return
-        try:
-            scanner = ItemScanner(on_result=lambda name: self._scan_name_signal.emit(name))
-            if scanner.available:
-                scanner.scan()
-            else:
-                self._scan_name_signal.emit("\x00__UNAVAILABLE__")
-        except Exception as exc:
-            print(f"[Scanner] Unexpected error in OCR trigger: {exc}")
-            try:
-                self._scan_name_signal.emit("\x00__ERROR__")
-            except Exception:
-                pass
-        finally:
+
+        scanner = ItemScanner(on_result=lambda name: self._scan_name_signal.emit(name))
+        if not scanner.available:
             self._scan_lock.release()
+            self._scan_name_signal.emit("\x00__UNAVAILABLE__")
+            return
+
+        def _run_scan() -> None:
+            try:
+                scanner.scan()
+            except Exception as exc:
+                print(f"[Scanner] Unexpected error in OCR trigger: {exc}")
+                try:
+                    self._scan_name_signal.emit("\x00__ERROR__")
+                except Exception:
+                    pass
+            finally:
+                self._scan_lock.release()
+
+        threading.Thread(target=_run_scan, daemon=True).start()
 
     def _on_scan_name(self, name: str) -> None:
         """Runs on the main thread (delivered via queued signal from OCR thread)."""
@@ -197,7 +208,11 @@ class MainWindow(QMainWindow):
             )
             return
 
-        if name in ("\x00__ERROR__", "\x00__NO_RESULT__"):
+        if name == "\x00__NO_RESULT__":
+            self._scan_popup.show_item(None, "no item detected", None)
+            return
+
+        if name == "\x00__ERROR__":
             self._scan_popup.show_item(None, "scan error", None)
             return
 
@@ -215,9 +230,22 @@ class MainWindow(QMainWindow):
         except Exception:
             quests = []
 
+        try:
+            expedition_projects = self._metaforge.get_expedition_projects()
+        except Exception:
+            expedition_projects = []
+
+        # Prefer the matched item's canonical name for RT lookup; the raw OCR
+        # string is multi-line (all candidates) and won't match the name_map.
+        enrich_name = (
+            (item.get("name") if item else None)
+            or name.strip().split("\n")[0]
+        )
+        print(f"[Scanner] Enriching as: {repr(enrich_name)}")
+
         def _do_enrich():
             try:
-                return self._rt.enrich(name, quests)
+                return self._rt.enrich(enrich_name, quests, expedition_projects)
             except Exception as exc:
                 print(f"[Scanner] RT enrichment failed: {exc}")
                 return None
@@ -258,10 +286,20 @@ class MainWindow(QMainWindow):
         Case-insensitive name match against the cached items list.
 
         `name` may be a newline-separated list of OCR candidates (produced by
-        the scanner when the tooltip contains multiple ALL-CAPS groups). Each
-        candidate is tried in order; the first database hit is returned so that
-        loot-location descriptors ("TOPSIDE MATERIAL") are automatically skipped
-        when they don't match any real item.
+        the scanner when the tooltip contains multiple ALL-CAPS groups).
+
+        Matching is done in three tiers, lowest-to-highest confidence:
+          Tier 1 — Exact:    query == item name (case-insensitive)
+          Tier 2 — Contains: query is a substring of the item name and covers
+                             ≥40% of it (prevents "BLUEPRINT" matching
+                             "Angled Grip II Blueprint")
+          Tier 3 — Overlap:  ≥50% of query words (min 2) appear in item name
+
+        Critically, ALL candidates are evaluated at each tier before moving to
+        the next.  This guarantees an exact match on any candidate always wins
+        over a fuzzy match on an earlier candidate — so if the OCR yields
+        ["BLUEPRINT", "SNAP HOOK BLUEPRINT"], the exact match on the second
+        candidate is returned rather than a loose contains hit on the first.
         """
         items = self._item_tab.cached_items
         if not items:
@@ -269,40 +307,90 @@ class MainWindow(QMainWindow):
             return None
 
         candidates = [c.strip() for c in name.strip().split("\n") if c.strip()]
-        print(f"[Match] Trying {len(candidates)} candidate(s) against {len(items)} items: {candidates}")
+        print(f"[Match] Candidates: {candidates}  ({len(items)} items in cache)")
 
-        for candidate in candidates:
-            result = self._match_single(candidate, items)
-            if result:
-                print(f"[Match] Matched {repr(candidate)} → {result.get('name')!r}")
-                return result
+        # Tier 1 — exact (all candidates)
+        for cand in candidates:
+            item = self._match_exact(cand, items)
+            if item:
+                print(f"[Match] Tier 1 exact: {repr(cand)} → {item.get('name')!r}")
+                return item
 
-        print(f"[Match] No match found for any candidate")
+        # Tier 2 — contains (all candidates)
+        for cand in candidates:
+            item = self._match_contains(cand, items)
+            if item:
+                print(f"[Match] Tier 2 contains: {repr(cand)} → {item.get('name')!r}")
+                return item
+
+        # Tier 3 — word overlap (all candidates)
+        for cand in candidates:
+            item = self._match_overlap(cand, items)
+            if item:
+                print(f"[Match] Tier 3 overlap: {repr(cand)} → {item.get('name')!r}")
+                return item
+
+        print("[Match] No match found for any candidate")
         return None
 
-    def _match_single(self, query_raw: str, items: list[dict]) -> dict | None:
-        """Try exact → contains → word-overlap match for a single query string."""
+    def _match_exact(self, query_raw: str, items: list[dict]) -> dict | None:
+        """Case-insensitive exact match."""
         query = query_raw.strip().lower()
-        # Exact
         for item in items:
             if (item.get("name") or "").lower() == query:
                 return item
-        # Contains
+        return None
+
+    def _match_contains(self, query_raw: str, items: list[dict]) -> dict | None:
+        """Substring match — query must cover ≥40% of the matched item name.
+
+        Without the length ratio guard, a single shared word like "BLUEPRINT"
+        would match "Angled Grip II Blueprint" (a long name that merely contains
+        the word).  The 40% threshold requires the query to represent a
+        substantial portion of the name, so short generic fragments are skipped.
+
+        Among all qualifying items, the one with the highest query/name ratio
+        is returned (most specific match first).
+        """
+        query = query_raw.strip().lower()
+        if not query:
+            return None
+        best_item, best_ratio = None, 0.0
         for item in items:
-            if query in (item.get("name") or "").lower():
-                return item
-        # Word overlap (require ≥2 words matching to avoid false positives on
-        # single generic words like "MATERIAL" or "ARC")
+            item_name = (item.get("name") or "").lower()
+            if not item_name or query not in item_name:
+                continue
+            ratio = len(query) / len(item_name)
+            if ratio < 0.4:
+                continue
+            if ratio > best_ratio:
+                best_item, best_ratio = item, ratio
+        return best_item
+
+    def _match_overlap(self, query_raw: str, items: list[dict]) -> dict | None:
+        """Word-set overlap match.
+
+        Requires both an absolute minimum of 2 matching words AND that at
+        least half the query words match.  This prevents a single shared word
+        like "Blueprint" from producing a false-positive hit.
+
+        Examples for a 3-word query ("SNAP HOOK BLUEPRINT"):
+          "Angled Grip II Blueprint"  → 1 shared word  < min(2, ceil(3/2)=2) → rejected
+          "Snap Hook Blueprint"       → 3 shared words ≥ 2                   → accepted
+        """
+        query = query_raw.strip().lower()
         query_words = set(query.split())
         if len(query_words) < 2:
             return None
+        # Require ≥50% of query words to match, with a hard floor of 2.
+        min_score = max(2, -(-len(query_words) // 2))  # ceil division
         best, best_score = None, 0
         for item in items:
             item_words = set((item.get("name") or "").lower().split())
             score = len(query_words & item_words)
             if score > best_score:
                 best, best_score = item, score
-        return best if best_score >= 2 else None
+        return best if best_score >= min_score else None
 
     # ------------------------------------------------------------------
     # Menu bar

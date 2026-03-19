@@ -60,7 +60,33 @@ class MetaForgeAPI:
         return _unwrap(self._client.get(f"{BASE_URL}/api/arc-raiders/arcs", ttl=300))
 
     def get_quests(self) -> list[dict]:
-        return _unwrap(self._client.get(f"{BASE_URL}/api/arc-raiders/quests", ttl=300))
+        cache_key = f"{BASE_URL}/api/arc-raiders/quests?all"
+        try:
+            cached = self._client.get(cache_key, ttl=300)
+            if isinstance(cached, list):
+                return cached
+        except Exception:
+            pass
+
+        quests: list[dict] = []
+        page = 1
+        while True:
+            url = f"{BASE_URL}/api/arc-raiders/quests?page={page}&limit=50"
+            try:
+                resp = self._client.get(url, ttl=300)
+            except Exception:
+                break
+            quests.extend(_unwrap(resp))
+            pagination = resp.get("pagination", {}) if isinstance(resp, dict) else {}
+            if not pagination.get("hasNextPage"):
+                break
+            page += 1
+
+        self._client._cache[cache_key] = (
+            __import__("time").monotonic() + 300,
+            quests,
+        )
+        return quests
 
     def get_traders(self) -> list[dict]:
         return _unwrap(self._client.get(f"{BASE_URL}/api/arc-raiders/traders", ttl=300))
@@ -74,6 +100,10 @@ class MetaForgeAPI:
 
     def get_events(self) -> list[dict]:
         return _unwrap(self._client.get(f"{BASE_URL}/api/arc-raiders/events", ttl=60))
+
+    def get_expedition_projects(self) -> list[dict]:
+        """Fetch all expedition project phases (flat array, no pagination)."""
+        return _unwrap(self._client.get(f"{BASE_URL}/api/arc-raiders/expedition", ttl=3600))
 
     def get_workshop(self) -> list[dict]:
         return _unwrap(self._client.get(f"{BASE_URL}/api/arc-raiders/workshop", ttl=300))

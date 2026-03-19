@@ -1,6 +1,6 @@
 # Developer Notes
 
-Internal notes for AI-assisted development. Not for public distribution.
+Internal developer notes. Not for public distribution.
 
 ---
 

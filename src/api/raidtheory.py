@@ -219,6 +219,41 @@ class RaidTheoryClient:
             return list(self._used_in.get(rt_id, []))
 
     # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _parse_material_list(self, raw) -> list[dict]:
+        """Parse a recyclesInto / salvagesInto value into a normalised list.
+
+        The RT dataset uses two formats:
+          • List:  [{"itemId": "battery", "quantity": 2}, ...]
+          • Dict:  {"battery": 2, "exodus_modules": 1}
+
+        Both are normalised to [{"name": str, "qty": int}].
+        """
+        out: list[dict] = []
+        if not raw:
+            return out
+        if isinstance(raw, dict):
+            for iid, qty in raw.items():
+                if iid:
+                    out.append({
+                        "name": self.get_item_name(iid),
+                        "qty": int(qty) if qty else 1,
+                    })
+        elif isinstance(raw, list):
+            for entry in raw:
+                if isinstance(entry, dict):
+                    iid = entry.get("itemId") or entry.get("id") or entry.get("item_id", "")
+                    qty = entry.get("quantity") or entry.get("qty") or entry.get("amount") or 1
+                    if iid:
+                        out.append({
+                            "name": self.get_item_name(iid),
+                            "qty": int(qty),
+                        })
+        return out
+
+    # ------------------------------------------------------------------
     # Main enrichment entry point
     # ------------------------------------------------------------------
 
@@ -226,6 +261,7 @@ class RaidTheoryClient:
         self,
         display_name: str,
         mf_quests: list[dict] | None = None,
+        expedition_projects: list[dict] | None = None,
     ) -> dict:
         """
         Return a merged enrichment dict for the named item.
@@ -237,36 +273,40 @@ class RaidTheoryClient:
           salvage:  list[{"name": str, "qty": int}]
           used_in:  list[{"name": str, "bench": str}]
           traders:  list[{"trader", "qty", "cost_item", "cost_qty", "daily_limit"}]
-          quests:   list[{"name": str, "trader": str}]
+          quests:   list[{"name": str, "trader": str, "qty": int|None}]
+          found_in: list[str]   (loot locations / zones)
         """
         rt_id, rt_item = self.find_by_name(display_name)
 
         result: dict = {
-            "rt_id": rt_id,
-            "rt_item": rt_item,
-            "recycle": [],
-            "salvage": [],
-            "used_in": [],
-            "traders": [],
-            "quests": [],
+            "rt_id":    rt_id,
+            "rt_item":  rt_item,
+            "recycle":  [],
+            "salvage":  [],
+            "used_in":  [],
+            "traders":  [],
+            "quests":   [],
+            "found_in": [],
         }
 
         if rt_item and rt_id:
-            # Recycle output
-            for entry in (rt_item.get("recyclesInto") or []):
-                if isinstance(entry, dict):
-                    result["recycle"].append({
-                        "name": self.get_item_name(entry.get("itemId", "")),
-                        "qty": entry.get("quantity", 1),
-                    })
+            # Recycle output — RT data may use list-of-dicts OR plain dict format
+            result["recycle"] = self._parse_material_list(rt_item.get("recyclesInto"))
 
-            # Salvage output
-            for entry in (rt_item.get("salvagesInto") or []):
-                if isinstance(entry, dict):
-                    result["salvage"].append({
-                        "name": self.get_item_name(entry.get("itemId", "")),
-                        "qty": entry.get("quantity", 1),
-                    })
+            # Salvage output — same dual-format handling
+            result["salvage"] = self._parse_material_list(rt_item.get("salvagesInto"))
+
+            # Found-in locations — try several possible field names
+            found_raw = (
+                rt_item.get("foundIn")
+                or rt_item.get("locations")
+                or rt_item.get("zones")
+                or []
+            )
+            if isinstance(found_raw, list):
+                result["found_in"] = [str(loc) for loc in found_raw if loc]
+            elif isinstance(found_raw, str) and found_raw:
+                result["found_in"] = [found_raw]
 
             # Trader listings
             for trade in self.get_trader_listings(rt_id):
@@ -296,6 +336,10 @@ class RaidTheoryClient:
         # Quest requirements from MetaForge quest data
         if mf_quests:
             query_lower = display_name.strip().lower()
+            print(f"[Enrich] Checking {len(mf_quests)} quests for {repr(display_name)}")
+            if mf_quests:
+                first_req = (mf_quests[0].get("required_items") or [])
+                print(f"[Enrich] Sample required_items[0]: {first_req[:2] if first_req else '(empty)'}")
             for quest in mf_quests:
                 q_name = quest.get("name") or quest.get("title") or "Unknown Quest"
                 q_trader = quest.get("trader") or ""
@@ -304,12 +348,57 @@ class RaidTheoryClient:
                 for req in (quest.get("required_items") or []):
                     if not isinstance(req, dict):
                         continue
-                    req_name = (req.get("name") or "").strip().lower()
-                    if req_name and (req_name == query_lower or query_lower in req_name):
+                    # MetaForge format: {"item": {"id": "geiger-counter", "name": "Geiger Counter", ...}, "quantity": N}
+                    item_obj = req.get("item")
+                    if isinstance(item_obj, dict):
+                        req_raw_name = (item_obj.get("name") or "").strip().lower()
+                        # "id" field on the nested item is the slug (e.g. "geiger-counter")
+                        req_slug_raw = (item_obj.get("id") or item_obj.get("slug") or "").strip().lower()
+                    else:
+                        # Flat format: {"slug": "...", "name": "...", "quantity": N}
+                        req_raw_name = (req.get("name") or "").strip().lower()
+                        req_slug_raw = (req.get("slug") or req.get("item_id") or "").strip().lower()
+                    # Normalise underscores/hyphens → spaces for slug-as-name matching
+                    req_name = re.sub(r"[_\-]+", " ", req_raw_name)
+                    req_slug = re.sub(r"[_\-]+", " ", req_slug_raw)
+                    matched = (
+                        (req_raw_name and (req_raw_name == query_lower or query_lower in req_raw_name))
+                        or (req_name and (req_name == query_lower or query_lower in req_name))
+                        or (req_slug and (req_slug == query_lower or query_lower in req_slug))
+                    )
+                    if matched:
+                        qty = req.get("qty") or req.get("quantity") or req.get("amount") or req.get("count")
                         result["quests"].append({
                             "name": str(q_name),
                             "trader": str(q_trader),
+                            "qty": int(qty) if qty else None,
                         })
                         break  # one entry per quest
+        else:
+            print(f"[Enrich] mf_quests is {'empty list' if mf_quests is not None else 'None'} — quests may not have loaded yet")
+
+        # Expedition project requirements from MetaForge /expedition endpoint
+        if expedition_projects:
+            query_lower_exp = display_name.strip().lower()
+            print(f"[Enrich] Checking {len(expedition_projects)} expedition phases for {repr(display_name)}")
+            for phase_entry in expedition_projects:
+                for req in (phase_entry.get("requirements") or []):
+                    req_name = (req.get("name") or "").strip().lower()
+                    # "id" field is the slug, e.g. "geiger-counter"
+                    req_id_norm = re.sub(r"[_\-]+", " ", (req.get("id") or "")).strip().lower()
+                    if req_name == query_lower_exp or req_id_norm == query_lower_exp:
+                        project = phase_entry.get("project", "Unknown Project")
+                        phase   = phase_entry.get("phase", "")
+                        category = phase_entry.get("category", "")
+                        phase_label = f"{phase}: {category}" if category else phase
+                        need = req.get("need") or req.get("quantity") or req.get("qty") or 1
+                        result["quests"].append({
+                            "name":   project,
+                            "trader": phase_label,
+                            "qty":    int(need),
+                        })
+                        break  # one entry per expedition phase
+        else:
+            print(f"[Enrich] No expedition project data available")
 
         return result

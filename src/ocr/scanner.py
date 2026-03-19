@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import re
 import tempfile
+from collections import deque
 from typing import Callable, Optional
 
 try:
@@ -44,17 +45,19 @@ except Exception:
     _CTYPES_OK = False
 
 
-# Capture region relative to cursor.
-# The tooltip floats ABOVE the hovered item; on large screens with the cursor
-# near the bottom edge the tooltip top can be 600-700 px above the cursor.
-_REGION_W = 700
-_REGION_H = 800
-_REGION_LEFT_OFFSET = -350   # left edge relative to cursor x
-_REGION_TOP_OFFSET  = -700   # top edge relative to cursor y (reach high)
-
 # Minimum tooltip size in pixels to accept a detected bright region.
 _MIN_TOOLTIP_W = 180
 _MIN_TOOLTIP_H = 80
+
+# Downscale factor for full-screen tooltip detection.
+# At 16×, a 1920×1080 screen becomes ~120×68 — fast to scan.
+# Text inside the tooltip (~20–40 px tall) shrinks to ≤2 px and disappears,
+# leaving the solid cream background as one coherent blob.
+_DETECT_SCALE = 16
+
+# Minimum fill ratio: bright pixels in component ÷ bounding-box area.
+# Rejects scattered bright noise whose bbox is large but internally sparse.
+_MIN_FILL_RATIO = 0.35
 
 
 def _get_cursor_pos() -> tuple[int, int]:
@@ -67,69 +70,107 @@ def _get_cursor_pos() -> tuple[int, int]:
 
 
 # ---------------------------------------------------------------------------
-# Tooltip detection
+# Tooltip detection — BFS connected components
 # ---------------------------------------------------------------------------
 
 def _find_tooltip_bbox(img: Image.Image) -> tuple[int, int, int, int] | None:
     """
-    Detect the ARC Raiders tooltip box by finding the largest bright region
-    in the captured image.
+    Detect the ARC Raiders tooltip box by finding the largest connected blob
+    of cream/white pixels in the captured image.
 
     The tooltip renders on a cream/white background; the game's inventory
-    screen dims everything behind it to near-black. We downsample 4× for
-    speed, threshold per-pixel brightness, then scale the bounding box back.
+    screen dims everything behind it to near-black. We downsample 16× for
+    speed, threshold per-pixel brightness, then use BFS (8-connectivity) to
+    find connected components. The largest component whose bounding box meets
+    the minimum size and fill-ratio constraints is returned.
+
+    Using connected components (instead of overall bright-pixel bounding box)
+    prevents scattered UI elements — item icons, stash panel backgrounds,
+    text highlights — from inflating the detected region.
 
     Returns (left, top, right, bottom) in original-image pixels, or None.
     """
-    SCALE = 4
-    small = img.resize(
-        (max(1, img.width // SCALE), max(1, img.height // SCALE)),
-        Image.BOX,
-    ).convert("RGB")
+    S = _DETECT_SCALE
+    sw = max(1, img.width  // S)
+    sh = max(1, img.height // S)
+    small = img.resize((sw, sh), Image.BOX).convert("RGB")
 
+    # Build a 2-D boolean bright mask.
     if _NUMPY_OK:
         arr = _np.array(small)
         r, g, b = arr[:, :, 0], arr[:, :, 1], arr[:, :, 2]
-        # Cream/white: all channels high; tooltip bg is warm so blue is
-        # slightly below red/green.
-        bright = (
+        bright_np = (
             (r.astype(_np.int16) > 200)
             & (g.astype(_np.int16) > 190)
             & (b.astype(_np.int16) > 175)
         )
-        rows = _np.where(bright.any(axis=1))[0]
-        cols = _np.where(bright.any(axis=0))[0]
-        if not rows.size or not cols.size:
-            return None
-        rmin, rmax = int(rows[0]), int(rows[-1])
-        cmin, cmax = int(cols[0]), int(cols[-1])
+        # Convert to a list-of-lists for the shared BFS below.
+        bright = bright_np.tolist()
     else:
-        # Pure-PIL path (no numpy): pixel-by-pixel on the downsampled image.
         px = small.load()
-        w, h = small.size
-        r_set: set[int] = set()
-        c_set: set[int] = set()
-        for y in range(h):
-            for x in range(w):
-                rv, gv, bv = px[x, y]
-                if rv > 200 and gv > 190 and bv > 175:
-                    r_set.add(y)
-                    c_set.add(x)
-        if not r_set or not c_set:
-            return None
-        rmin, rmax = min(r_set), max(r_set)
-        cmin, cmax = min(c_set), max(c_set)
+        bright = [
+            [
+                (px[x, y][0] > 200 and px[x, y][1] > 190 and px[x, y][2] > 175)
+                for x in range(sw)
+            ]
+            for y in range(sh)
+        ]
 
-    # Reject regions that are too small to be a tooltip.
-    if (rmax - rmin) * SCALE < _MIN_TOOLTIP_H or (cmax - cmin) * SCALE < _MIN_TOOLTIP_W:
+    # BFS to find connected components (8-connectivity).
+    visited = [[False] * sw for _ in range(sh)]
+    best_bounds = None
+    best_size   = 0
+
+    NEIGHBORS = [(-1,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)]
+
+    for sy in range(sh):
+        for sx in range(sw):
+            if visited[sy][sx] or not bright[sy][sx]:
+                continue
+            # BFS from (sy, sx).
+            queue  = deque([(sy, sx)])
+            rmin, rmax, cmin, cmax = sy, sy, sx, sx
+            size   = 0
+            while queue:
+                y, x = queue.popleft()
+                if visited[y][x]:
+                    continue
+                visited[y][x] = True
+                size += 1
+                if y < rmin: rmin = y
+                if y > rmax: rmax = y
+                if x < cmin: cmin = x
+                if x > cmax: cmax = x
+                for dy, dx in NEIGHBORS:
+                    ny, nx = y + dy, x + dx
+                    if 0 <= ny < sh and 0 <= nx < sw and not visited[ny][nx] and bright[ny][nx]:
+                        queue.append((ny, nx))
+
+            if size <= best_size:
+                continue
+
+            # Fill-ratio check: reject sparse noise.
+            bbox_area = max(1, (rmax - rmin + 1) * (cmax - cmin + 1))
+            if size / bbox_area < _MIN_FILL_RATIO:
+                continue
+
+            # Size check (in original-image pixels).
+            if (rmax - rmin) * S < _MIN_TOOLTIP_H or (cmax - cmin) * S < _MIN_TOOLTIP_W:
+                continue
+
+            best_size   = size
+            best_bounds = (rmin, rmax, cmin, cmax)
+
+    if best_bounds is None:
         return None
 
-    pad = SCALE * 3
+    rmin, rmax, cmin, cmax = best_bounds
+    pad = S * 3
     return (
-        max(0, cmin * SCALE - pad),
-        max(0, rmin * SCALE - pad),
-        min(img.width,  cmax * SCALE + pad),
-        min(img.height, rmax * SCALE + pad),
+        max(0, cmin * S - pad),
+        max(0, rmin * S - pad),
+        min(img.width,  cmax * S + pad),
+        min(img.height, rmax * S + pad),
     )
 
 
@@ -240,7 +281,7 @@ def _extract_candidates(raw_text: str) -> list[str]:
 
 
 class ItemScanner:
-    """Captures a region around the cursor and extracts an item name via OCR."""
+    """Captures the full screen and extracts an item name via OCR."""
 
     def __init__(
         self,
@@ -248,14 +289,14 @@ class ItemScanner:
         region: Optional[dict] = None,
     ):
         self._on_result = on_result
-        self._fixed_region = region  # if set, bypasses cursor-relative logic
+        self._fixed_region = region  # if set, bypasses full-screen capture
 
     @property
     def available(self) -> bool:
         return _MSS_OK and _TESS_OK
 
     def scan(self) -> None:
-        """Capture region around cursor, run OCR, invoke callback with result."""
+        """Capture the screen, run OCR, invoke callback with result."""
         if not _MSS_OK:
             print("[ItemScanner] mss not installed — OCR unavailable")
             return
@@ -264,20 +305,16 @@ class ItemScanner:
             return
 
         try:
-            # ── Build capture region ──────────────────────────────────────────
-            if self._fixed_region:
-                region = self._fixed_region
-                print(f"[ItemScanner] Using fixed region: {region}")
-            else:
-                cx, cy = _get_cursor_pos()
-                left = max(0, cx + _REGION_LEFT_OFFSET)
-                top  = max(0, cy + _REGION_TOP_OFFSET)
-                region = {"left": left, "top": top, "width": _REGION_W, "height": _REGION_H}
-                print(f"[ItemScanner] Cursor at ({cx}, {cy}), capture region: {region}")
-
             # ── Screenshot ───────────────────────────────────────────────────
             with mss.mss() as sct:
-                shot = sct.grab(region)
+                if self._fixed_region:
+                    region = self._fixed_region
+                    print(f"[ItemScanner] Using fixed region: {region}")
+                    shot = sct.grab(region)
+                else:
+                    monitor = sct.monitors[1]  # primary physical monitor
+                    print(f"[ItemScanner] Full-screen capture: {monitor}")
+                    shot = sct.grab(monitor)
                 img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
 
             debug_path = os.path.join(tempfile.gettempdir(), "arc_scanner_debug.png")
@@ -349,9 +386,14 @@ class ItemScanner:
                 self._on_result("\n".join(all_cands))
             else:
                 print("[ItemScanner] No usable text found — check debug images")
+                self._on_result("\x00__NO_RESULT__")
 
         except Exception as exc:
             print(f"[ItemScanner] OCR error: {exc}")
+            try:
+                self._on_result("\x00__ERROR__")
+            except Exception:
+                pass
 
     def update_region(self, region: dict) -> None:
         self._fixed_region = region
