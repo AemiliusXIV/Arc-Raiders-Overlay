@@ -25,3 +25,6 @@ dist/
 # OS
 Thumbs.db
 .DS_Store
+
+# Debug output from OCR scanners
+debug_*.png
