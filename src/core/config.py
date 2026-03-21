@@ -30,6 +30,7 @@ DEFAULTS: dict = {
     "synced_projects": [],
     "project_auto_sync": False,
     "hotkey_project_sync": "alt+p",
+    "show_overlay_toast": True,
 }
 
 
@@ -238,3 +239,11 @@ class Config:
     @hotkey_project_sync.setter
     def hotkey_project_sync(self, value: str) -> None:
         self.set("hotkey_project_sync", value)
+
+    @property
+    def show_overlay_toast(self) -> bool:
+        return bool(self._data.get("show_overlay_toast", DEFAULTS["show_overlay_toast"]))
+
+    @show_overlay_toast.setter
+    def show_overlay_toast(self, value: bool) -> None:
+        self.set("show_overlay_toast", bool(value))

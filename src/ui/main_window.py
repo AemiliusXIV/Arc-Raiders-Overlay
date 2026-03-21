@@ -32,6 +32,7 @@ from src.ui.blueprint_tracker import BlueprintTab
 from src.ui.weekly_trials import WeeklyTrialsTab
 from src.ui.minimap_overlay import MinimapOverlay
 from src.ui.overlay import OverlayWindow
+from src.ui.overlay_toast import OverlayToast
 from src.ui.scanner_result import ScannerResultWindow
 from src.ui.settings_dialog import SettingsDialog
 from src.ui.project_sync_dialog import ProjectSyncDialog
@@ -106,6 +107,9 @@ class MainWindow(QMainWindow):
         # Scanner result popup — shown after OCR scan
         self._scan_popup = ScannerResultWindow()
         self._scan_name_signal.connect(self._on_scan_name)
+
+        # Overlay toggle toast notification
+        self._overlay_toast = OverlayToast()
 
         # Project sync hotkey signal (keyboard thread → main thread)
         self._project_sync_hotkey_signal.connect(self._open_or_trigger_sync_dialog)
@@ -372,6 +376,8 @@ class MainWindow(QMainWindow):
                 self._scan_popup.show_item(
                     item, name,
                     enrichment if isinstance(enrichment, dict) else None,
+                    synced_projects=self._config.synced_projects,
+                    expedition_projects=expedition_projects,
                 )
             except Exception as exc:
                 print(f"[Scanner] Error showing result popup: {exc}")
@@ -617,6 +623,10 @@ class MainWindow(QMainWindow):
         visible = not self._overlay.isVisible()
         self._overlay.setVisible(visible)
         self._overlay_action.setChecked(visible)
+        if self._config.show_overlay_toast:
+            self._overlay_toast.show_toast(
+                "Overlay Enabled" if visible else "Overlay Disabled"
+            )
 
     # ------------------------------------------------------------------
     # Minimap overlay toggle
@@ -643,6 +653,7 @@ class MainWindow(QMainWindow):
             self._config.minimap_opacity,
             project_sync_hotkey=self._config.hotkey_project_sync,
             project_auto_sync=self._config.project_auto_sync,
+            show_overlay_toast=self._config.show_overlay_toast,
             parent=self,
         )
         if dlg.exec() != SettingsDialog.DialogCode.Accepted:
@@ -657,6 +668,7 @@ class MainWindow(QMainWindow):
 
         self._minimap.set_opacity(dlg.minimap_opacity)
         self._set_auto_sync(dlg.project_auto_sync)
+        self._config.show_overlay_toast = dlg.show_overlay_toast
 
     # ------------------------------------------------------------------
     # Public helpers used by hotkey / OCR

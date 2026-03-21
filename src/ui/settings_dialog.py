@@ -67,6 +67,7 @@ class SettingsDialog(QDialog):
         minimap_opacity: float,
         project_sync_hotkey: str = "alt+p",
         project_auto_sync: bool = False,
+        show_overlay_toast: bool = True,
         parent: QWidget | None = None,
     ):
         super().__init__(parent)
@@ -138,6 +139,21 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(ps_group)
 
+        # Notifications group
+        notif_group = QGroupBox("Notifications")
+        notif_form = QFormLayout(notif_group)
+
+        self._overlay_toast_cb = QCheckBox("Show notification when overlay is toggled on/off")
+        self._overlay_toast_cb.setChecked(show_overlay_toast)
+        self._overlay_toast_cb.setToolTip(
+            "Displays a brief 'Overlay Enabled' / 'Overlay Disabled' message\n"
+            "on screen when you press the overlay toggle hotkey.\n"
+            "Disable if you find it distracting."
+        )
+        notif_form.addRow(self._overlay_toast_cb)
+
+        layout.addWidget(notif_group)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save
             | QDialogButtonBox.StandardButton.Cancel
@@ -174,3 +190,7 @@ class SettingsDialog(QDialog):
     @property
     def project_auto_sync(self) -> bool:
         return self._auto_sync_cb.isChecked()
+
+    @property
+    def show_overlay_toast(self) -> bool:
+        return self._overlay_toast_cb.isChecked()

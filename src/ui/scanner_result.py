@@ -181,6 +181,8 @@ class ScannerResultWindow(QWidget):
         item: dict | None,
         queried_name: str,
         enrichment: dict | None = None,
+        synced_projects: list[dict] | None = None,
+        expedition_projects: list[dict] | None = None,
     ) -> None:
         """Populate and display the result card."""
         self._clear()
@@ -188,7 +190,7 @@ class ScannerResultWindow(QWidget):
         if item is None and (not enrichment or not enrichment.get("rt_item")):
             self._build_not_found(queried_name)
         else:
-            self._build_item(item, enrichment)
+            self._build_item(item, enrichment, synced_projects or [], expedition_projects or [])
 
         self.adjustSize()
         self._position()
@@ -212,7 +214,13 @@ class ScannerResultWindow(QWidget):
         lbl.setWordWrap(True)
         self._card_layout.addWidget(lbl)
 
-    def _build_item(self, item: dict | None, enrichment: dict | None) -> None:
+    def _build_item(
+        self,
+        item: dict | None,
+        enrichment: dict | None,
+        synced_projects: list[dict] | None = None,
+        expedition_projects: list[dict] | None = None,
+    ) -> None:
         mf = item or {}
         rt = (enrichment or {}).get("rt_item") or {}
         e  = enrichment or {}
@@ -308,6 +316,14 @@ class ScannerResultWindow(QWidget):
                     _bullet(f"{entry['name']}  ×{entry['qty']}  (salvage)", "#80cbc4")
                 )
 
+        # ── Project Progress (from locally synced project data) ───────────
+        item_lookup_name = name  # canonical name already resolved above
+        self._build_project_progress(
+            item_lookup_name,
+            synced_projects or [],
+            expedition_projects or [],
+        )
+
         # ── Projects (quest / project requirements) ───────────────────────
         if quests:
             self._card_layout.addWidget(_divider())
@@ -362,6 +378,98 @@ class ScannerResultWindow(QWidget):
         hint.setStyleSheet("color: #383838; font-size: 9px; margin-top: 8px;")
         hint.setAlignment(Qt.AlignmentFlag.AlignRight)
         self._card_layout.addWidget(hint)
+
+    def _build_project_progress(
+        self,
+        item_name: str,
+        synced_projects: list[dict],
+        expedition_projects: list[dict],
+    ) -> None:
+        """Show current project progress and any known future stage requirements.
+
+        Rules:
+        - Current stage (have < need): show "Project — Stage X: Y still needed"
+        - Complete (have >= need): silent — omit entirely
+        - Future stage (not yet synced, found in expedition_projects): show "Future"
+        - Not needed anywhere: show nothing
+        """
+        if not item_name:
+            return
+
+        name_lower = item_name.strip().lower()
+        current_rows: list[tuple[str, str, int]] = []  # (project, stage_label, still_needed)
+        synced_project_names_lower: set[str] = set()
+
+        for proj in synced_projects:
+            project_name = proj.get("project", "")
+            phase_frac   = proj.get("phase_fraction", "")
+            items        = proj.get("items", [])
+
+            synced_project_names_lower.add(project_name.strip().lower())
+
+            stage_label = ""
+            if "/" in phase_frac:
+                stage_num, stage_total = phase_frac.split("/", 1)
+                stage_label = f"Stage {stage_num.strip()}"
+
+            for it in items:
+                if it.get("name", "").strip().lower() == name_lower:
+                    have = int(it.get("have", 0))
+                    need = int(it.get("need", 0))
+                    if have < need:
+                        current_rows.append((project_name, stage_label, need - have))
+                    # have >= need → complete, skip silently
+                    break
+
+        # Future stages: look in MetaForge expedition_projects for phases we
+        # haven't synced yet that require this item.
+        future_rows: list[tuple[str, str]] = []  # (project_name, stage_label)
+        for phase in expedition_projects:
+            phase_proj  = (phase.get("name") or phase.get("project") or "").strip()
+            phase_stage = str(phase.get("phase") or phase.get("stage") or phase.get("order") or "")
+
+            # Skip if this project phase is already covered by synced data.
+            if phase_proj.strip().lower() in synced_project_names_lower:
+                continue
+
+            # Try common field names for item requirement lists.
+            req_list = (
+                phase.get("items")
+                or phase.get("required_items")
+                or phase.get("requirements")
+                or phase.get("item_requirements")
+                or []
+            )
+            for req in req_list:
+                req_name = (
+                    req.get("name")
+                    or (req.get("item") or {}).get("name")
+                    or ""
+                ).strip().lower()
+                if req_name == name_lower:
+                    stage_label = f"Stage {phase_stage}" if phase_stage else ""
+                    future_rows.append((phase_proj, stage_label))
+                    break
+
+        if not current_rows and not future_rows:
+            return
+
+        self._card_layout.addWidget(_divider())
+        self._card_layout.addWidget(_section_label("Project Progress"))
+
+        for project_name, stage_label, still_needed in current_rows:
+            header = project_name
+            if stage_label:
+                header += f" — {stage_label}"
+            self._card_layout.addWidget(
+                _value_row(header, f"{still_needed} still needed", "#ef9a9a")
+            )
+
+        for project_name, stage_label in future_rows:
+            text = f"Future: {project_name}"
+            if stage_label:
+                text += f" {stage_label}"
+            self._card_layout.addWidget(_bullet(text, "#ffb74d"))
 
     def _header_row(
         self,
