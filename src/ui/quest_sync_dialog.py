@@ -202,19 +202,36 @@ class QuestSyncDialog(QDialog):
         self._move_back()
         self._scan_btn.setEnabled(True)
 
-        lines = result.raw_lines
-        self._rebuild_list(lines)
+        # Show placeholder while the tracker fuzzy-matches the lines.
+        self._rebuild_list([])
+        self._empty_hint.setText("  Matching against quest database…")
+        self._empty_hint.setVisible(True)
+        self._set_status("Scan complete — matching quests…", error=False)
 
         # Emit for cross-referencing in the quest tracker tab.
-        self.quests_scanned.emit(lines)
+        # The tracker will call update_results() with the matched names.
+        self.quests_scanned.emit(result.raw_lines)
 
-        n = len(lines)
-        self._set_status(
-            f"Detected {n} text line(s). Quest status updated in the Quests tab.\n"
-            "Click Close when done, or scan again if the widget changed pages.",
-            error=False,
-            success=True,
+    def update_results(self, matched_names: list[str]) -> None:
+        """Called by the quest tracker after fuzzy-matching to display matched quests."""
+        self._empty_hint.setText(
+            "  No quests detected yet — switch to the game and click Scan."
         )
+        self._rebuild_list(matched_names)
+        n = len(matched_names)
+        if n:
+            self._set_status(
+                f"Matched {n} active quest(s). Quest status updated in the Quests tab.\n"
+                "Click Close when done, or scan again if the widget changed pages.",
+                error=False,
+                success=True,
+            )
+        else:
+            self._set_status(
+                "No quests matched. Make sure the quest widget is fully visible\n"
+                "and the play menu is open in Speranza, then try again.",
+                error=True,
+            )
 
     def _on_scan_error(self, message: str) -> None:
         self._move_back()

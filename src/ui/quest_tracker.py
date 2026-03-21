@@ -27,6 +27,7 @@ class QuestTrackerTab(QWidget):
         self._ardb = ardb
         self._all_quests: list[dict] = []
         self._worker: Worker | None = None
+        self._quest_sync_dlg = None  # reference held while dialog is open
 
         self._build_ui()
         QTimer.singleShot(0, self._start_fetch)
@@ -79,6 +80,11 @@ class QuestTrackerTab(QWidget):
         self._tracked_only = QCheckBox("Tracked only")
         self._tracked_only.toggled.connect(self._apply_filter)
         filter_row.addWidget(self._tracked_only)
+
+        self._active_only = QCheckBox("Active only")
+        self._active_only.setToolTip("Show only quests detected as active in your last sync")
+        self._active_only.toggled.connect(self._apply_filter)
+        filter_row.addWidget(self._active_only)
 
         self._status_label = QLabel("Loading…")
         filter_row.addWidget(self._status_label)
@@ -166,9 +172,10 @@ class QuestTrackerTab(QWidget):
         """Open the guided quest sync dialog (called from button or main window hotkey)."""
         from src.ui.quest_sync_dialog import QuestSyncDialog
         hotkey = self._config.hotkey_quest_sync
-        dlg = QuestSyncDialog(hotkey=hotkey, parent=self)
-        dlg.quests_scanned.connect(self._on_quests_scanned)
-        dlg.exec()
+        self._quest_sync_dlg = QuestSyncDialog(hotkey=hotkey, parent=self)
+        self._quest_sync_dlg.quests_scanned.connect(self._on_quests_scanned)
+        self._quest_sync_dlg.exec()
+        self._quest_sync_dlg = None
 
     def _on_quests_scanned(self, raw_lines: list[str]) -> None:
         """
@@ -250,6 +257,10 @@ class QuestTrackerTab(QWidget):
         self._update_sync_label()
         self._apply_filter()
 
+        # Update the dialog list to show only matched names (not raw OCR noise).
+        if self._quest_sync_dlg is not None:
+            self._quest_sync_dlg.update_results(active_names)
+
     def _reset_sync(self) -> None:
         """Clear all synced quest status."""
         self._config.synced_quests = []
@@ -285,19 +296,24 @@ class QuestTrackerTab(QWidget):
         query = self._search.text().strip().lower()
         trader_filter = self._trader_combo.currentText()
         tracked_only = self._tracked_only.isChecked()
+        active_only = self._active_only.isChecked()
         tracked_ids = set(self._config.tracked_quests)
+        active_ids = set(self._config.synced_quest_ids)
+        active_names = set(self._config.synced_quests)
 
         filtered = []
         for quest in self._all_quests:
-            name = (quest.get("name") or quest.get("title") or "").lower()
-            trader = self._trader_name(quest)
+            name = (quest.get("name") or quest.get("title") or "")
             quest_id = str(quest.get("id") or quest.get("slug") or quest.get("name") or "")
+            trader = self._trader_name(quest)
 
-            if query and query not in name:
+            if query and query not in name.lower():
                 continue
             if trader_filter != "All" and trader != trader_filter:
                 continue
             if tracked_only and quest_id not in tracked_ids:
+                continue
+            if active_only and quest_id not in active_ids and name not in active_names:
                 continue
             filtered.append(quest)
 
