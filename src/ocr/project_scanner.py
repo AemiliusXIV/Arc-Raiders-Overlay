@@ -18,6 +18,10 @@ from typing import Optional
 # Project root — two levels up from src/ocr/
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Set the environment variable DEBUG_OCR=1 to save debug images during development.
+# Never set in production — end users should see no debug output at all.
+_DEBUG_OCR = os.environ.get("DEBUG_OCR", "0") == "1"
+
 try:
     import mss
     _MSS_OK = True
@@ -546,12 +550,13 @@ def _rescan_fraction_region(
     crop = ImageOps.invert(crop)
     crop = ImageEnhance.Contrast(crop).enhance(2.0)
 
-    # Save debug crop.
-    try:
-        safe = block["text"][:20].replace(" ", "_")
-        crop.save(os.path.join(_PROJECT_ROOT, f"debug_frac_crop_{safe}.png"))
-    except Exception:
-        pass
+    # Save debug crop (only when DEBUG_OCR=1).
+    if _DEBUG_OCR:
+        try:
+            safe = block["text"][:20].replace(" ", "_")
+            crop.save(os.path.join(_PROJECT_ROOT, f"debug_frac_crop_{safe}.png"))
+        except Exception:
+            pass
 
     try:
         text = pytesseract.image_to_string(
@@ -617,12 +622,13 @@ class ProjectScanner:
         except Exception as exc:
             raise ProjectScanError(f"Screen capture failed: {exc}") from exc
 
-        # ── Debug: save raw capture ─────────────────────────────────────────
-        try:
-            img.save(os.path.join(_PROJECT_ROOT, "debug_scan_raw.png"))
-            print(f"[ProjectScanner] debug_scan_raw.png saved ({img.width}x{img.height})")
-        except Exception as e:
-            print(f"[ProjectScanner] Could not save debug_scan_raw.png: {e}")
+        # ── Debug: save raw capture (only when DEBUG_OCR=1) ────────────────
+        if _DEBUG_OCR:
+            try:
+                img.save(os.path.join(_PROJECT_ROOT, "debug_scan_raw.png"))
+                print(f"[ProjectScanner] debug_scan_raw.png saved ({img.width}x{img.height})")
+            except Exception as e:
+                print(f"[ProjectScanner] Could not save debug_scan_raw.png: {e}")
 
         screen_height = img.height
         screen_width  = img.width
@@ -630,12 +636,13 @@ class ProjectScanner:
         # ── Pre-process ────────────────────────────────────────────────────
         proc = _preprocess(img)
 
-        # ── Debug: save preprocessed capture ───────────────────────────────
-        try:
-            proc.save(os.path.join(_PROJECT_ROOT, "debug_scan_proc.png"))
-            print(f"[ProjectScanner] debug_scan_proc.png saved")
-        except Exception as e:
-            print(f"[ProjectScanner] Could not save debug_scan_proc.png: {e}")
+        # ── Debug: save preprocessed capture (only when DEBUG_OCR=1) ───────
+        if _DEBUG_OCR:
+            try:
+                proc.save(os.path.join(_PROJECT_ROOT, "debug_scan_proc.png"))
+                print(f"[ProjectScanner] debug_scan_proc.png saved")
+            except Exception as e:
+                print(f"[ProjectScanner] Could not save debug_scan_proc.png: {e}")
 
         # ── Tesseract OCR ─────────────────────────────────────────────────
         try:
