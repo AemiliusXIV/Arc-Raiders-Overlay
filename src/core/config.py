@@ -31,6 +31,11 @@ DEFAULTS: dict = {
     "project_auto_sync": False,
     "hotkey_project_sync": "alt+p",
     "show_overlay_toast": True,
+    "synced_quests": [],
+    "synced_quest_ids": [],
+    "synced_quests_at": "",
+    "quest_auto_sync": False,
+    "hotkey_quest_sync": "alt+q",
 }
 
 
@@ -247,3 +252,43 @@ class Config:
     @show_overlay_toast.setter
     def show_overlay_toast(self, value: bool) -> None:
         self.set("show_overlay_toast", bool(value))
+
+    @property
+    def synced_quests(self) -> list[str]:
+        return self._data.get("synced_quests", [])
+
+    @synced_quests.setter
+    def synced_quests(self, value: list[str]) -> None:
+        self.set("synced_quests", value)
+
+    @property
+    def synced_quest_ids(self) -> list[str]:
+        return self._data.get("synced_quest_ids", [])
+
+    @synced_quest_ids.setter
+    def synced_quest_ids(self, value: list[str]) -> None:
+        self.set("synced_quest_ids", value)
+
+    @property
+    def synced_quests_at(self) -> str:
+        return self._data.get("synced_quests_at", "")
+
+    @synced_quests_at.setter
+    def synced_quests_at(self, value: str) -> None:
+        self.set("synced_quests_at", value)
+
+    @property
+    def quest_auto_sync(self) -> bool:
+        return bool(self._data.get("quest_auto_sync", DEFAULTS["quest_auto_sync"]))
+
+    @quest_auto_sync.setter
+    def quest_auto_sync(self, value: bool) -> None:
+        self.set("quest_auto_sync", bool(value))
+
+    @property
+    def hotkey_quest_sync(self) -> str:
+        return self._data.get("hotkey_quest_sync", DEFAULTS["hotkey_quest_sync"])
+
+    @hotkey_quest_sync.setter
+    def hotkey_quest_sync(self, value: str) -> None:
+        self.set("hotkey_quest_sync", value)

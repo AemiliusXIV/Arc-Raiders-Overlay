@@ -68,6 +68,8 @@ class SettingsDialog(QDialog):
         project_sync_hotkey: str = "alt+p",
         project_auto_sync: bool = False,
         show_overlay_toast: bool = True,
+        quest_sync_hotkey: str = "alt+q",
+        quest_auto_sync: bool = False,
         parent: QWidget | None = None,
     ):
         super().__init__(parent)
@@ -139,6 +141,25 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(ps_group)
 
+        # Quest Sync group
+        qs_group = QGroupBox("Quest Sync")
+        qs_form = QFormLayout(qs_group)
+
+        self._quest_sync_edit = HotkeyEdit(quest_sync_hotkey)
+        qs_form.addRow("Scan Hotkey:", self._quest_sync_edit)
+
+        self._quest_auto_sync_cb = QCheckBox(
+            "Silently sync quest status when hotkey is pressed (no dialog)"
+        )
+        self._quest_auto_sync_cb.setChecked(quest_auto_sync)
+        self._quest_auto_sync_cb.setToolTip(
+            "When enabled, pressing the hotkey scans immediately without opening\n"
+            "the guided dialog. Make sure the play menu is visible before pressing."
+        )
+        qs_form.addRow(self._quest_auto_sync_cb)
+
+        layout.addWidget(qs_group)
+
         # Notifications group
         notif_group = QGroupBox("Notifications")
         notif_form = QFormLayout(notif_group)
@@ -194,3 +215,11 @@ class SettingsDialog(QDialog):
     @property
     def show_overlay_toast(self) -> bool:
         return self._overlay_toast_cb.isChecked()
+
+    @property
+    def quest_sync_hotkey(self) -> str:
+        return self._quest_sync_edit.text().strip()
+
+    @property
+    def quest_auto_sync(self) -> bool:
+        return self._quest_auto_sync_cb.isChecked()

@@ -30,6 +30,10 @@ try:
 except ImportError:
     _TESS_OK = False
 
+# Set DEBUG_OCR=1 in your environment to save debug images during development.
+# End users see no debug files — this is never set in production.
+_DEBUG_OCR = os.environ.get("DEBUG_OCR", "0") == "1"
+
 try:
     import numpy as _np
     _NUMPY_OK = True
@@ -364,9 +368,10 @@ class ItemScanner:
                     shot = sct.grab(monitor)
                 img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
 
-            debug_path = os.path.join(tempfile.gettempdir(), "arc_scanner_debug.png")
-            img.save(debug_path)
-            print(f"[ItemScanner] Raw capture saved to: {debug_path}")
+            if _DEBUG_OCR:
+                debug_path = os.path.join(tempfile.gettempdir(), "arc_scanner_debug.png")
+                img.save(debug_path)
+                print(f"[ItemScanner] Raw capture saved to: {debug_path}")
 
             # ── Detect tooltip, crop to the item-name zone ───────────────────
             # The tooltip layout (top to bottom):
@@ -397,9 +402,10 @@ class ItemScanner:
             name_zone = ImageEnhance.Contrast(name_zone).enhance(2.0)
             name_zone = name_zone.convert("L")
 
-            proc_path = os.path.join(tempfile.gettempdir(), "arc_scanner_proc.png")
-            name_zone.save(proc_path)
-            print(f"[ItemScanner] Processed name zone saved to: {proc_path}")
+            if _DEBUG_OCR:
+                proc_path = os.path.join(tempfile.gettempdir(), "arc_scanner_proc.png")
+                name_zone.save(proc_path)
+                print(f"[ItemScanner] Processed name zone saved to: {proc_path}")
 
             # ── Primary: font-size-based extraction ──────────────────────────
             # image_to_data gives us per-word bounding boxes; the item name

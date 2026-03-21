@@ -47,6 +47,8 @@ class MainWindow(QMainWindow):
     _project_sync_hotkey_signal = pyqtSignal()
     # Emitted from keyboard-library thread to toggle overlay on main thread
     _overlay_hotkey_signal = pyqtSignal()
+    # Emitted from keyboard-library thread to open/trigger quest sync on main thread
+    _quest_sync_hotkey_signal = pyqtSignal()
     # Emitted from project auto-sync worker thread
     _project_scan_signal = pyqtSignal(object)  # ProjectScanResult | str (error)
 
@@ -117,6 +119,8 @@ class MainWindow(QMainWindow):
         self._overlay_hotkey_signal.connect(self.toggle_overlay)
         # Project sync hotkey signal (keyboard thread → main thread)
         self._project_sync_hotkey_signal.connect(self._open_or_trigger_sync_dialog)
+        # Quest sync hotkey signal (keyboard thread → main thread)
+        self._quest_sync_hotkey_signal.connect(self._open_or_trigger_quest_sync)
         # Project auto-sync signal (delivered from worker thread to main thread)
         self._project_scan_signal.connect(self._on_project_scan_result)
 
@@ -172,9 +176,15 @@ class MainWindow(QMainWindow):
         else:
             print(f"[Hotkeys] Failed to bind project sync to {self._config.hotkey_project_sync}")
 
+        if self._hotkeys.register(self._config.hotkey_quest_sync, self._quest_sync_trigger):
+            print(f"[Hotkeys] Quest sync bound to: {self._config.hotkey_quest_sync}")
+        else:
+            print(f"[Hotkeys] Failed to bind quest sync to {self._config.hotkey_quest_sync}")
+
     def _rebind_hotkeys(
         self, new_scan: str, new_overlay: str, new_minimap: str,
         new_project_sync: str = "",
+        new_quest_sync: str = "",
     ) -> tuple[bool, str]:
         """Unregister old hotkeys, apply new ones. Returns (success, error_msg)."""
         if not self._hotkeys.available:
@@ -184,6 +194,7 @@ class MainWindow(QMainWindow):
         self._hotkeys.unregister(self._config.hotkey_overlay)
         self._hotkeys.unregister(self._config.hotkey_minimap)
         self._hotkeys.unregister(self._config.hotkey_project_sync)
+        self._hotkeys.unregister(self._config.hotkey_quest_sync)
 
         errors = []
         if new_scan:
@@ -213,6 +224,13 @@ class MainWindow(QMainWindow):
             else:
                 errors.append(f"Could not bind project sync to '{new_project_sync}'")
                 self._hotkeys.register(self._config.hotkey_project_sync, self._project_sync_trigger)
+
+        if new_quest_sync:
+            if self._hotkeys.register(new_quest_sync, self._quest_sync_trigger):
+                self._config.hotkey_quest_sync = new_quest_sync
+            else:
+                errors.append(f"Could not bind quest sync to '{new_quest_sync}'")
+                self._hotkeys.register(self._config.hotkey_quest_sync, self._quest_sync_trigger)
 
         if errors:
             return False, "\n".join(errors)
@@ -274,6 +292,42 @@ class MainWindow(QMainWindow):
         the Qt main thread via the queued connection established in __init__.
         """
         self._project_sync_hotkey_signal.emit()
+
+    def _quest_sync_trigger(self) -> None:
+        """Called from keyboard-library thread — must not touch Qt widgets directly."""
+        self._quest_sync_hotkey_signal.emit()
+
+    def _open_or_trigger_quest_sync(self) -> None:
+        """Runs on the main thread — open the quest sync dialog or scan silently."""
+        if self._config.quest_auto_sync:
+            self._run_silent_quest_scan()
+        else:
+            self._quest_tab.open_sync_dialog()
+
+    def _run_silent_quest_scan(self) -> None:
+        """Silent quest scan (no dialog) — used when quest auto-sync is enabled."""
+        from src.ocr.quest_scanner import QuestScanner, QuestScanError
+
+        scanner = QuestScanner()
+        if not scanner.available:
+            return
+
+        def _run() -> None:
+            try:
+                result = scanner.scan_page()
+                # Deliver raw lines to the quest tab on the main thread via a
+                # zero-delay timer — we cannot call Qt methods from this thread.
+                from PyQt6.QtCore import QTimer
+                QTimer.singleShot(
+                    0,
+                    lambda: self._quest_tab._on_quests_scanned(result.raw_lines),
+                )
+            except QuestScanError:
+                pass
+            except Exception as exc:
+                print(f"[QuestSync] Silent scan error: {exc}")
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def _open_or_trigger_sync_dialog(self) -> None:
         """Runs on the main thread."""
@@ -667,6 +721,8 @@ class MainWindow(QMainWindow):
             project_sync_hotkey=self._config.hotkey_project_sync,
             project_auto_sync=self._config.project_auto_sync,
             show_overlay_toast=self._config.show_overlay_toast,
+            quest_sync_hotkey=self._config.hotkey_quest_sync,
+            quest_auto_sync=self._config.quest_auto_sync,
             parent=self,
         )
         if dlg.exec() != SettingsDialog.DialogCode.Accepted:
@@ -675,6 +731,7 @@ class MainWindow(QMainWindow):
         ok, err = self._rebind_hotkeys(
             dlg.scan_hotkey, dlg.overlay_hotkey, dlg.minimap_hotkey,
             new_project_sync=dlg.project_sync_hotkey,
+            new_quest_sync=dlg.quest_sync_hotkey,
         )
         if not ok:
             QMessageBox.warning(self, "Hotkey Error", err)
@@ -682,6 +739,7 @@ class MainWindow(QMainWindow):
         self._minimap.set_opacity(dlg.minimap_opacity)
         self._set_auto_sync(dlg.project_auto_sync)
         self._config.show_overlay_toast = dlg.show_overlay_toast
+        self._config.quest_auto_sync = dlg.quest_auto_sync
 
     # ------------------------------------------------------------------
     # Public helpers used by hotkey / OCR
