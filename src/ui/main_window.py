@@ -45,6 +45,8 @@ class MainWindow(QMainWindow):
     _scan_name_signal = pyqtSignal(str)
     # Emitted from keyboard-library thread to open/trigger project sync on main thread
     _project_sync_hotkey_signal = pyqtSignal()
+    # Emitted from keyboard-library thread to toggle overlay on main thread
+    _overlay_hotkey_signal = pyqtSignal()
     # Emitted from project auto-sync worker thread
     _project_scan_signal = pyqtSignal(object)  # ProjectScanResult | str (error)
 
@@ -111,6 +113,8 @@ class MainWindow(QMainWindow):
         # Overlay toggle toast notification
         self._overlay_toast = OverlayToast()
 
+        # Overlay hotkey signal (keyboard thread → main thread)
+        self._overlay_hotkey_signal.connect(self.toggle_overlay)
         # Project sync hotkey signal (keyboard thread → main thread)
         self._project_sync_hotkey_signal.connect(self._open_or_trigger_sync_dialog)
         # Project auto-sync signal (delivered from worker thread to main thread)
@@ -153,7 +157,7 @@ class MainWindow(QMainWindow):
         else:
             print(f"[Hotkeys] Failed to bind item scanner to {self._config.hotkey_scan}")
 
-        if self._hotkeys.register(self._config.hotkey_overlay, self.toggle_overlay):
+        if self._hotkeys.register(self._config.hotkey_overlay, self._overlay_hotkey_trigger):
             print(f"[Hotkeys] Overlay toggle bound to: {self._config.hotkey_overlay}")
         else:
             print(f"[Hotkeys] Failed to bind overlay toggle to {self._config.hotkey_overlay}")
@@ -190,11 +194,11 @@ class MainWindow(QMainWindow):
                 self._hotkeys.register(self._config.hotkey_scan, self._ocr_trigger)
 
         if new_overlay:
-            if self._hotkeys.register(new_overlay, self.toggle_overlay):
+            if self._hotkeys.register(new_overlay, self._overlay_hotkey_trigger):
                 self._config.hotkey_overlay = new_overlay
             else:
                 errors.append(f"Could not bind overlay toggle to '{new_overlay}'")
-                self._hotkeys.register(self._config.hotkey_overlay, self.toggle_overlay)
+                self._hotkeys.register(self._config.hotkey_overlay, self._overlay_hotkey_trigger)
 
         if new_minimap:
             if self._hotkeys.register(new_minimap, self.toggle_minimap):
@@ -253,6 +257,15 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Project sync hotkey + auto-sync
     # ------------------------------------------------------------------
+
+    def _overlay_hotkey_trigger(self) -> None:
+        """Called from keyboard-library thread — must not touch Qt widgets directly.
+
+        Emits a signal so that toggle_overlay() runs safely on the Qt main
+        thread.  QPropertyAnimation (used by OverlayToast) must only be
+        started from the main thread.
+        """
+        self._overlay_hotkey_signal.emit()
 
     def _project_sync_trigger(self) -> None:
         """Called from keyboard-library thread — must not touch Qt widgets directly.
