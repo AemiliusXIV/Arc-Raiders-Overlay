@@ -1,17 +1,21 @@
-"""Needed Items tab — aggregates required items across all quests."""
+"""Needed Items tab — aggregates required items across all quests, plus synced project data."""
 
 from __future__ import annotations
+
+import datetime
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox, QSpinBox,
+    QGroupBox, QMessageBox,
 )
 
 from src.api.metaforge import MetaForgeAPI
 from src.core.config import Config
 from src.core.worker import Worker
+from src.ocr.project_scanner import ProjectScanResult
 
 _MF_BASE = "https://metaforge.app/api/arc-raiders"
 
@@ -34,6 +38,12 @@ class NeededItemsTab(QWidget):
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+
+        # ── Quest Requirements group ──────────────────────────────────────
+        quest_group = QGroupBox("Quest Requirements")
+        quest_layout = QVBoxLayout(quest_group)
+        quest_layout.setSpacing(6)
 
         toolbar = QHBoxLayout()
         self._status_label = QLabel("Loading…")
@@ -46,7 +56,7 @@ class NeededItemsTab(QWidget):
         refresh_btn = QPushButton("Refresh")
         refresh_btn.clicked.connect(self._force_refresh)
         toolbar.addWidget(refresh_btn)
-        layout.addLayout(toolbar)
+        quest_layout.addLayout(toolbar)
 
         self._table = QTableWidget(0, 5)
         self._table.setHorizontalHeaderLabels(
@@ -60,7 +70,65 @@ class NeededItemsTab(QWidget):
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.verticalHeader().setVisible(False)
-        layout.addWidget(self._table)
+        quest_layout.addWidget(self._table)
+
+        layout.addWidget(quest_group, stretch=1)
+
+        # ── Project Requirements group ────────────────────────────────────
+        proj_group = QGroupBox("Project Requirements")
+        proj_layout = QVBoxLayout(proj_group)
+        proj_layout.setSpacing(6)
+
+        proj_toolbar = QHBoxLayout()
+
+        self._proj_header = QLabel("")
+        self._proj_header.setStyleSheet("font-size: 11px; color: #aaa;")
+        proj_toolbar.addWidget(self._proj_header)
+
+        self._auto_sync_label = QLabel("● Auto-syncing")
+        self._auto_sync_label.setStyleSheet("color: #50c050; font-size: 11px;")
+        self._auto_sync_label.setVisible(False)
+        proj_toolbar.addWidget(self._auto_sync_label)
+
+        proj_toolbar.addStretch()
+
+        self._sync_btn = QPushButton("Sync Projects")
+        self._sync_btn.setToolTip(
+            "Open the guided scan dialog to read your in-game project hand-in screen"
+        )
+        self._sync_btn.clicked.connect(self._open_sync_dialog)
+        proj_toolbar.addWidget(self._sync_btn)
+
+        self._reset_btn = QPushButton("Reset")
+        self._reset_btn.setToolTip("Clear all synced project data")
+        self._reset_btn.clicked.connect(self._reset_projects)
+        proj_toolbar.addWidget(self._reset_btn)
+
+        proj_layout.addLayout(proj_toolbar)
+
+        self._proj_table = QTableWidget(0, 4)
+        self._proj_table.setHorizontalHeaderLabels(
+            ["Item", "Progress", "Project / Phase", "Status"]
+        )
+        self._proj_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self._proj_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self._proj_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self._proj_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self._proj_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._proj_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._proj_table.verticalHeader().setVisible(False)
+        proj_layout.addWidget(self._proj_table)
+
+        self._proj_empty_label = QLabel(
+            'No project data synced yet.  Click "Sync Projects" to scan your in-game screen.'
+        )
+        self._proj_empty_label.setStyleSheet("color: #888; font-style: italic; padding: 4px;")
+        self._proj_empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        proj_layout.addWidget(self._proj_empty_label)
+
+        layout.addWidget(proj_group, stretch=1)
+
+        self._populate_projects_table()
 
     # ------------------------------------------------------------------
     # Public API
@@ -71,12 +139,15 @@ class NeededItemsTab(QWidget):
         """Raw quest list from MetaForge — used by RT enrichment for quest cross-referencing."""
         return self._raw_quests
 
+    def set_auto_sync_indicator(self, active: bool) -> None:
+        """Show or hide the auto-sync status indicator."""
+        self._auto_sync_label.setVisible(active)
+
     # ------------------------------------------------------------------
-    # Fetch
+    # Fetch (quest data from API)
     # ------------------------------------------------------------------
 
     def _fetch(self) -> dict:
-        # Build a slug→name map from the full MetaForge items list for fallback resolution.
         try:
             all_items = self._metaforge.get_items()
             item_name_map: dict[str, str] = {
@@ -99,23 +170,17 @@ class NeededItemsTab(QWidget):
                 if not isinstance(entry, dict):
                     continue
 
-                # MetaForge format:
-                #   {"id": <UUID>, "item": {"id": "battery", "name": "Battery", …},
-                #    "item_id": "battery", "quantity": N}
-                # The top-level "id" is the requirement UUID — never use it as the item key.
                 item_obj = entry.get("item")
                 if isinstance(item_obj, dict):
                     slug = item_obj.get("id") or item_obj.get("slug") or ""
                     name = item_obj.get("name") or ""
                 else:
-                    # Flat format fallback (shouldn't occur with current API but kept for safety)
                     slug = str(entry.get("item_id") or entry.get("slug") or "")
                     name = str(entry.get("name") or "")
 
                 if not slug:
                     continue
 
-                # Resolve name: MetaForge items DB → prettify slug
                 if not name or name == slug:
                     name = item_name_map.get(slug, "")
                 if not name:
@@ -132,7 +197,6 @@ class NeededItemsTab(QWidget):
         return {"totals": totals, "raw_quests": quests}
 
     def _start_fetch(self) -> None:
-        # Disconnect any previous worker to avoid stale callbacks.
         if self._worker is not None:
             try:
                 self._worker.finished.disconnect()
@@ -151,9 +215,7 @@ class NeededItemsTab(QWidget):
     def _force_refresh(self) -> None:
         """Clear the quests cache and reload from the API."""
         client = self._metaforge._client
-        # Invalidate the paginated sentinel key used by get_quests()
         client.invalidate(f"{_MF_BASE}/quests?all")
-        # Invalidate individual page URLs in case they were cached separately
         for page in range(1, 10):
             client.invalidate(f"{_MF_BASE}/quests?page={page}&limit=50")
         self._start_fetch()
@@ -172,7 +234,7 @@ class NeededItemsTab(QWidget):
         self._status_label.setText(f"Error: {msg}")
 
     # ------------------------------------------------------------------
-    # Table
+    # Quest items table
     # ------------------------------------------------------------------
 
     def _populate_table(self) -> None:
@@ -195,7 +257,6 @@ class NeededItemsTab(QWidget):
 
             spin = QSpinBox()
             spin.setRange(0, 9999)
-            # Block signals so setValue() doesn't trigger _on_have_changed while building the table
             spin.blockSignals(True)
             spin.setValue(have)
             spin.blockSignals(False)
@@ -216,20 +277,206 @@ class NeededItemsTab(QWidget):
         if not slug:
             return
 
-        # Persist the updated count
         collected = dict(self._config.collected_items)
         collected[slug] = value
         self._config.collected_items = collected
 
-        # Update only the "Still Need" cell for this row — do NOT rebuild the
-        # whole table, which would create new spinboxes, each firing valueChanged
-        # and causing an infinite rebuild loop.
         info = self._totals.get(slug, {})
         still_need = max(0, info.get("total", 0) - value)
         for row in range(self._table.rowCount()):
             if self._table.cellWidget(row, 3) is spin:
                 self._table.setItem(row, 4, self._still_need_cell(still_need))
                 break
+
+    # ------------------------------------------------------------------
+    # Project sync
+    # ------------------------------------------------------------------
+
+    def _open_sync_dialog(self) -> None:
+        from src.ocr.project_scanner import _MSS_OK, _TESS_OK
+        if not (_MSS_OK and _TESS_OK):
+            QMessageBox.information(
+                self,
+                "Project Sync — Setup Required",
+                "The project screen reader requires Tesseract OCR to be installed.\n\n"
+                "1. Download and install Tesseract from:\n"
+                "   https://github.com/UB-Mannheim/tesseract/wiki\n\n"
+                "2. During installation, check \"Add Tesseract to PATH\".\n\n"
+                "3. Restart Arc Raiders Overlay.\n\n"
+                "Python packages also required:\n"
+                "   pip install mss pytesseract Pillow",
+            )
+            return
+
+        from src.ui.project_sync_dialog import ProjectSyncDialog
+        hotkey = self._config.hotkey_project_sync
+        dlg = ProjectSyncDialog(hotkey=hotkey, parent=self)
+        # page_scanned fires immediately after each successful scan (auto-save).
+        dlg.page_scanned.connect(self._on_page_scanned)
+        dlg.exec()
+
+    def _on_page_scanned(self, page: ProjectScanResult) -> None:
+        """Called immediately after each successful scan — saves without needing Apply."""
+        import datetime
+        now = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        new_entry = {
+            "project": page.project,
+            "phase_fraction": page.phase_fraction,
+            "scanned_at": now,
+            "items": [
+                {"name": it.name, "have": it.have, "need": it.need}
+                for it in page.items
+            ],
+        }
+        existing = list(self._config.synced_projects)
+        replaced = False
+        for i, old in enumerate(existing):
+            if (old.get("project") == new_entry["project"]
+                    and old.get("phase_fraction") == new_entry["phase_fraction"]):
+                existing[i] = new_entry
+                replaced = True
+                break
+        if not replaced:
+            existing.append(new_entry)
+        self._config.synced_projects = existing
+        self._populate_projects_table()
+
+    def _on_projects_synced(self, pages: list[ProjectScanResult]) -> None:
+        """Called when the sync dialog is accepted with scanned pages."""
+        now = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        serialised = []
+        for page in pages:
+            serialised.append({
+                "project": page.project,
+                "phase_fraction": page.phase_fraction,
+                "scanned_at": now,
+                "items": [
+                    {"name": it.name, "have": it.have, "need": it.need}
+                    for it in page.items
+                ],
+            })
+
+        # Merge with existing: replace pages for same project+phase, keep others.
+        existing = list(self._config.synced_projects)
+        for new_page in serialised:
+            replaced = False
+            for i, old in enumerate(existing):
+                if (old.get("project") == new_page["project"]
+                        and old.get("phase_fraction") == new_page["phase_fraction"]):
+                    existing[i] = new_page
+                    replaced = True
+                    break
+            if not replaced:
+                existing.append(new_page)
+
+        self._config.synced_projects = existing
+        self._populate_projects_table()
+
+    def update_from_auto_sync(self, page: ProjectScanResult) -> None:
+        """Called by the auto-sync timer in main_window with a fresh scan result."""
+        now = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        new_entry = {
+            "project": page.project,
+            "phase_fraction": page.phase_fraction,
+            "scanned_at": now,
+            "items": [
+                {"name": it.name, "have": it.have, "need": it.need}
+                for it in page.items
+            ],
+        }
+        existing = list(self._config.synced_projects)
+        replaced = False
+        for i, old in enumerate(existing):
+            if (old.get("project") == new_entry["project"]
+                    and old.get("phase_fraction") == new_entry["phase_fraction"]):
+                # Only update if data actually changed to avoid unnecessary writes.
+                if old != new_entry:
+                    existing[i] = new_entry
+                    replaced = True
+                break
+        if not replaced:
+            existing.append(new_entry)
+            replaced = True
+
+        if replaced:
+            self._config.synced_projects = existing
+            self._populate_projects_table()
+
+    def _reset_projects(self) -> None:
+        """Clear all synced project data after confirmation."""
+        reply = QMessageBox.question(
+            self,
+            "Reset Project Data",
+            "Clear all synced project data?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._config.synced_projects = []
+        self._populate_projects_table()
+
+    def _populate_projects_table(self) -> None:
+        projects = self._config.synced_projects
+
+        if not projects:
+            self._proj_table.setRowCount(0)
+            self._proj_table.setVisible(False)
+            self._proj_empty_label.setVisible(True)
+            self._proj_header.setText("Project Requirements (Synced)")
+            return
+
+        self._proj_empty_label.setVisible(False)
+        self._proj_table.setVisible(True)
+
+        # Flatten all items from all scanned pages into rows.
+        rows: list[tuple[str, str, str, bool]] = []
+        latest_ts = ""
+        for page in projects:
+            proj = page.get("project", "")
+            phase = page.get("phase_fraction", "")
+            scanned_at = page.get("scanned_at", "")
+            if scanned_at > latest_ts:
+                latest_ts = scanned_at
+            phase_label = f"{proj} ({phase})" if phase else proj
+            for item in page.get("items", []):
+                name = item.get("name", "")
+                have = int(item.get("have", 0))
+                need = int(item.get("need", 0))
+                progress = f"{have}/{need}"
+                complete = have >= need
+                rows.append((name, progress, phase_label, complete))
+
+        # Sort: incomplete first, then by name.
+        rows.sort(key=lambda r: (r[3], r[0].lower()))
+
+        self._proj_table.setRowCount(len(rows))
+        for row_idx, (name, progress, phase_label, complete) in enumerate(rows):
+            name_item = self._cell(name)
+            prog_item = self._cell(progress)
+            phase_item = self._cell(phase_label)
+
+            if complete:
+                color = QColor(80, 200, 80)
+                status_item = self._cell("Complete")
+                status_item.setForeground(color)
+            else:
+                color = QColor(220, 80, 80)
+                status_item = self._cell("Needed")
+                status_item.setForeground(color)
+
+            prog_item.setForeground(color)
+
+            self._proj_table.setItem(row_idx, 0, name_item)
+            self._proj_table.setItem(row_idx, 1, prog_item)
+            self._proj_table.setItem(row_idx, 2, phase_item)
+            self._proj_table.setItem(row_idx, 3, status_item)
+
+        total = len(rows)
+        done = sum(1 for r in rows if r[3])
+        ts_str = f"  last synced {latest_ts}" if latest_ts else ""
+        self._proj_header.setText(
+            f"{done}/{total} complete  ·  {ts_str}" if ts_str else f"{done}/{total} complete"
+        )
 
     # ------------------------------------------------------------------
     # Helpers

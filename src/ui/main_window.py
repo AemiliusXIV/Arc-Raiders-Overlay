@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 
-from PyQt6.QtCore import Qt, QEvent, pyqtSignal
+from PyQt6.QtCore import Qt, QEvent, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
     QMainWindow,
@@ -34,12 +34,18 @@ from src.ui.minimap_overlay import MinimapOverlay
 from src.ui.overlay import OverlayWindow
 from src.ui.scanner_result import ScannerResultWindow
 from src.ui.settings_dialog import SettingsDialog
+from src.ui.project_sync_dialog import ProjectSyncDialog
 from src.ocr.scanner import ItemScanner
+from src.ocr.project_scanner import ProjectScanner, ProjectScanError
 
 
 class MainWindow(QMainWindow):
     # Emitted from keyboard-library thread; processed safely on the Qt main thread
     _scan_name_signal = pyqtSignal(str)
+    # Emitted from keyboard-library thread to open/trigger project sync on main thread
+    _project_sync_hotkey_signal = pyqtSignal()
+    # Emitted from project auto-sync worker thread
+    _project_scan_signal = pyqtSignal(object)  # ProjectScanResult | str (error)
 
     def __init__(
         self,
@@ -65,6 +71,8 @@ class MainWindow(QMainWindow):
         # library may fire callbacks from a background thread. If the lock is
         # already held the new hotkey press is silently dropped.
         self._scan_lock = threading.Lock()
+        self._project_scan_lock = threading.Lock()
+        self._sync_dialog: ProjectSyncDialog | None = None
 
         self._tabs = QTabWidget()
         self.setCentralWidget(self._tabs)
@@ -98,6 +106,18 @@ class MainWindow(QMainWindow):
         # Scanner result popup — shown after OCR scan
         self._scan_popup = ScannerResultWindow()
         self._scan_name_signal.connect(self._on_scan_name)
+
+        # Project sync hotkey signal (keyboard thread → main thread)
+        self._project_sync_hotkey_signal.connect(self._open_or_trigger_sync_dialog)
+        # Project auto-sync signal (delivered from worker thread to main thread)
+        self._project_scan_signal.connect(self._on_project_scan_result)
+
+        # Auto-sync timer — polls for project screen when enabled
+        self._auto_sync_timer = QTimer(self)
+        self._auto_sync_timer.setInterval(3000)  # 3-second poll interval
+        self._auto_sync_timer.timeout.connect(self._auto_sync_tick)
+        if config.project_auto_sync:
+            self._auto_sync_timer.start()
 
         self._build_menu()
         self._build_tray()
@@ -139,8 +159,14 @@ class MainWindow(QMainWindow):
         else:
             print(f"[Hotkeys] Failed to bind minimap toggle to {self._config.hotkey_minimap}")
 
+        if self._hotkeys.register(self._config.hotkey_project_sync, self._project_sync_trigger):
+            print(f"[Hotkeys] Project sync bound to: {self._config.hotkey_project_sync}")
+        else:
+            print(f"[Hotkeys] Failed to bind project sync to {self._config.hotkey_project_sync}")
+
     def _rebind_hotkeys(
-        self, new_scan: str, new_overlay: str, new_minimap: str
+        self, new_scan: str, new_overlay: str, new_minimap: str,
+        new_project_sync: str = "",
     ) -> tuple[bool, str]:
         """Unregister old hotkeys, apply new ones. Returns (success, error_msg)."""
         if not self._hotkeys.available:
@@ -149,6 +175,7 @@ class MainWindow(QMainWindow):
         self._hotkeys.unregister(self._config.hotkey_scan)
         self._hotkeys.unregister(self._config.hotkey_overlay)
         self._hotkeys.unregister(self._config.hotkey_minimap)
+        self._hotkeys.unregister(self._config.hotkey_project_sync)
 
         errors = []
         if new_scan:
@@ -171,6 +198,13 @@ class MainWindow(QMainWindow):
             else:
                 errors.append(f"Could not bind minimap toggle to '{new_minimap}'")
                 self._hotkeys.register(self._config.hotkey_minimap, self.toggle_minimap)
+
+        if new_project_sync:
+            if self._hotkeys.register(new_project_sync, self._project_sync_trigger):
+                self._config.hotkey_project_sync = new_project_sync
+            else:
+                errors.append(f"Could not bind project sync to '{new_project_sync}'")
+                self._hotkeys.register(self._config.hotkey_project_sync, self._project_sync_trigger)
 
         if errors:
             return False, "\n".join(errors)
@@ -211,6 +245,67 @@ class MainWindow(QMainWindow):
                 self._scan_lock.release()
 
         threading.Thread(target=_run_scan, daemon=True).start()
+
+    # ------------------------------------------------------------------
+    # Project sync hotkey + auto-sync
+    # ------------------------------------------------------------------
+
+    def _project_sync_trigger(self) -> None:
+        """Called from keyboard-library thread — must not touch Qt widgets directly.
+
+        Emits a signal so that _open_or_trigger_sync_dialog() runs safely on
+        the Qt main thread via the queued connection established in __init__.
+        """
+        self._project_sync_hotkey_signal.emit()
+
+    def _open_or_trigger_sync_dialog(self) -> None:
+        """Runs on the main thread."""
+        if self._sync_dialog is not None and self._sync_dialog.isVisible():
+            self._sync_dialog.trigger_scan()
+        else:
+            hotkey = self._config.hotkey_project_sync
+            self._sync_dialog = ProjectSyncDialog(hotkey=hotkey, parent=self)
+            self._sync_dialog.page_scanned.connect(self._needed_tab._on_page_scanned)
+            self._sync_dialog.projects_synced.connect(self._needed_tab._on_projects_synced)
+            self._sync_dialog.show()
+
+    def _auto_sync_tick(self) -> None:
+        """Fired by the auto-sync timer. Runs a project screen scan in background."""
+        if not self._project_scan_lock.acquire(blocking=False):
+            return  # previous scan still running
+
+        scanner = ProjectScanner()
+        if not scanner.available:
+            self._project_scan_lock.release()
+            return
+
+        def _run() -> None:
+            try:
+                result = scanner.scan_page()
+                self._project_scan_signal.emit(result)
+            except ProjectScanError:
+                pass  # not a project screen — ignore silently
+            except Exception as exc:
+                print(f"[AutoSync] Unexpected error: {exc}")
+            finally:
+                self._project_scan_lock.release()
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _on_project_scan_result(self, result: object) -> None:
+        """Runs on the main thread — update the needed items tab with fresh data."""
+        from src.ocr.project_scanner import ProjectScanResult as _PSR
+        if isinstance(result, _PSR):
+            self._needed_tab.update_from_auto_sync(result)
+
+    def _set_auto_sync(self, enabled: bool) -> None:
+        """Start or stop the auto-sync timer and update the UI indicator."""
+        self._config.project_auto_sync = enabled
+        if enabled:
+            self._auto_sync_timer.start()
+        else:
+            self._auto_sync_timer.stop()
+        self._needed_tab.set_auto_sync_indicator(enabled)
 
     def _on_scan_name(self, name: str) -> None:
         """Runs on the main thread (delivered via queued signal from OCR thread)."""
@@ -546,18 +641,22 @@ class MainWindow(QMainWindow):
             self._config.hotkey_overlay,
             self._config.hotkey_minimap,
             self._config.minimap_opacity,
+            project_sync_hotkey=self._config.hotkey_project_sync,
+            project_auto_sync=self._config.project_auto_sync,
             parent=self,
         )
         if dlg.exec() != SettingsDialog.DialogCode.Accepted:
             return
 
         ok, err = self._rebind_hotkeys(
-            dlg.scan_hotkey, dlg.overlay_hotkey, dlg.minimap_hotkey
+            dlg.scan_hotkey, dlg.overlay_hotkey, dlg.minimap_hotkey,
+            new_project_sync=dlg.project_sync_hotkey,
         )
         if not ok:
             QMessageBox.warning(self, "Hotkey Error", err)
 
         self._minimap.set_opacity(dlg.minimap_opacity)
+        self._set_auto_sync(dlg.project_auto_sync)
 
     # ------------------------------------------------------------------
     # Public helpers used by hotkey / OCR

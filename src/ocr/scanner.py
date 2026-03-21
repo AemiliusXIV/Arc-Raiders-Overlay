@@ -45,9 +45,13 @@ except Exception:
     _CTYPES_OK = False
 
 
-# Minimum tooltip size in pixels to accept a detected bright region.
-_MIN_TOOLTIP_W = 180
-_MIN_TOOLTIP_H = 80
+# Minimum tooltip size expressed as a fraction of screen dimensions so the
+# detector works at 720p, 1080p, 1440p, 4K, and ultrawide resolutions.
+# Derived from 1920×1080 measurements: tooltip ≈ 200×100px.
+#   _MIN_TOOLTIP_W_FRAC = 180/1920 ≈ 0.094  (≈9% of screen width)
+#   _MIN_TOOLTIP_H_FRAC =  80/1080 ≈ 0.074  (≈7% of screen height)
+_MIN_TOOLTIP_W_FRAC = 0.094
+_MIN_TOOLTIP_H_FRAC = 0.074
 
 # Downscale factor for full-screen tooltip detection.
 # At 16×, a 1920×1080 screen becomes ~120×68 — fast to scan.
@@ -93,6 +97,8 @@ def _find_tooltip_bbox(img: Image.Image) -> tuple[int, int, int, int] | None:
     S = _DETECT_SCALE
     sw = max(1, img.width  // S)
     sh = max(1, img.height // S)
+    min_tip_w = max(40, int(img.width  * _MIN_TOOLTIP_W_FRAC))
+    min_tip_h = max(20, int(img.height * _MIN_TOOLTIP_H_FRAC))
     small = img.resize((sw, sh), Image.BOX).convert("RGB")
 
     # Build a 2-D boolean bright mask.
@@ -154,8 +160,8 @@ def _find_tooltip_bbox(img: Image.Image) -> tuple[int, int, int, int] | None:
             if size / bbox_area < _MIN_FILL_RATIO:
                 continue
 
-            # Size check (in original-image pixels).
-            if (rmax - rmin) * S < _MIN_TOOLTIP_H or (cmax - cmin) * S < _MIN_TOOLTIP_W:
+            # Size check (in original-image pixels, thresholds scale with resolution).
+            if (rmax - rmin) * S < min_tip_h or (cmax - cmin) * S < min_tip_w:
                 continue
 
             best_size   = size
@@ -280,6 +286,47 @@ def _extract_candidates(raw_text: str) -> list[str]:
     return candidates
 
 
+def _find_game_monitor(sct) -> dict:
+    """
+    Return the mss monitor dict for the monitor that contains Arc Raiders.
+
+    Falls back to the primary monitor (monitors[1]) if the game window cannot
+    be found or the platform does not support the win32 calls.
+    """
+    try:
+        import ctypes.wintypes
+        user32 = ctypes.windll.user32
+        found: list[int] = []
+
+        def _cb(hwnd: int, _: int) -> bool:
+            if user32.IsWindowVisible(hwnd):
+                length = user32.GetWindowTextLengthW(hwnd)
+                buf = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, buf, length + 1)
+                if (("Arc Raiders" in buf.value or "ArcRaiders" in buf.value)
+                        and "Overlay" not in buf.value):
+                    found.append(hwnd)
+            return True
+
+        WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_int, ctypes.c_int)
+        user32.EnumWindows(WNDENUMPROC(_cb), 0)
+
+        if found:
+            rect = ctypes.wintypes.RECT()
+            user32.GetWindowRect(found[0], ctypes.byref(rect))
+            game_cx = (rect.left + rect.right) // 2
+            game_cy = (rect.top + rect.bottom) // 2
+            for mon in sct.monitors[1:]:
+                if (mon["left"] <= game_cx < mon["left"] + mon["width"]
+                        and mon["top"] <= game_cy < mon["top"] + mon["height"]):
+                    print(f"[ItemScanner] Game on monitor: {mon}")
+                    return mon
+    except Exception as exc:
+        print(f"[ItemScanner] Monitor detection failed: {exc}")
+
+    return sct.monitors[1]   # fallback: primary monitor
+
+
 class ItemScanner:
     """Captures the full screen and extracts an item name via OCR."""
 
@@ -312,7 +359,7 @@ class ItemScanner:
                     print(f"[ItemScanner] Using fixed region: {region}")
                     shot = sct.grab(region)
                 else:
-                    monitor = sct.monitors[1]  # primary physical monitor
+                    monitor = _find_game_monitor(sct)
                     print(f"[ItemScanner] Full-screen capture: {monitor}")
                     shot = sct.grab(monitor)
                 img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")

@@ -27,6 +27,9 @@ DEFAULTS: dict = {
     "minimap_position": None,
     "minimap_size": None,
     "minimap_opacity": 0.85,
+    "synced_projects": [],
+    "project_auto_sync": False,
+    "hotkey_project_sync": "alt+p",
 }
 
 
@@ -211,3 +214,27 @@ class Config:
     @minimap_opacity.setter
     def minimap_opacity(self, value: float) -> None:
         self.set("minimap_opacity", max(0.2, min(1.0, float(value))))
+
+    @property
+    def synced_projects(self) -> list:
+        return self._data.get("synced_projects", [])
+
+    @synced_projects.setter
+    def synced_projects(self, value: list) -> None:
+        self.set("synced_projects", value)
+
+    @property
+    def project_auto_sync(self) -> bool:
+        return bool(self._data.get("project_auto_sync", DEFAULTS["project_auto_sync"]))
+
+    @project_auto_sync.setter
+    def project_auto_sync(self, value: bool) -> None:
+        self.set("project_auto_sync", bool(value))
+
+    @property
+    def hotkey_project_sync(self) -> str:
+        return self._data.get("hotkey_project_sync", DEFAULTS["hotkey_project_sync"])
+
+    @hotkey_project_sync.setter
+    def hotkey_project_sync(self, value: str) -> None:
+        self.set("hotkey_project_sync", value)

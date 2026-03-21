@@ -23,5 +23,63 @@
   "hotkey_minimap": "alt+m",
   "minimap_position": null,
   "minimap_size": null,
-  "minimap_opacity": 0.85
+  "minimap_opacity": 0.85,
+  "synced_projects": [
+    {
+      "project": "DOMINANT DANGERS",
+      "phase_fraction": "4/5",
+      "scanned_at": "2026-03-21T01:10:16",
+      "items": [
+        {
+          "name": "Magnetic Accelerator",
+          "have": 10,
+          "need": 10
+        },
+        {
+          "name": "Rocketeer Driver",
+          "have": 8,
+          "need": 8
+        },
+        {
+          "name": "Queen Reactor",
+          "have": 3,
+          "need": 3
+        },
+        {
+          "name": "Arc Synthetic Resin",
+          "have": 3,
+          "need": 10
+        }
+      ]
+    },
+    {
+      "project": "FOUNDATION",
+      "phase_fraction": "1/6",
+      "scanned_at": "2026-03-21T01:11:35",
+      "items": [
+        {
+          "name": "Metal Parts",
+          "have": 0,
+          "need": 150
+        },
+        {
+          "name": "Rubber Parts",
+          "have": 0,
+          "need": 200
+        },
+        {
+          "name": "Arc Alloy",
+          "have": 0,
+          "need": 80
+        },
+        {
+          "name": "Steel Spring",
+          "have": 0,
+          "need": 15
+        }
+      ]
+    }
+  ],
+  "project_auto_sync": false,
+  "hotkey_project_sync": "alt+p"
 }

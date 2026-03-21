@@ -5,7 +5,7 @@ from __future__ import annotations
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QKeyEvent, QKeySequence
 from PyQt6.QtWidgets import (
-    QDialog, QDialogButtonBox, QFormLayout, QGroupBox,
+    QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QSlider, QVBoxLayout, QWidget,
 )
 
@@ -65,6 +65,8 @@ class SettingsDialog(QDialog):
         overlay_hotkey: str,
         minimap_hotkey: str,
         minimap_opacity: float,
+        project_sync_hotkey: str = "alt+p",
+        project_auto_sync: bool = False,
         parent: QWidget | None = None,
     ):
         super().__init__(parent)
@@ -119,6 +121,23 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(mm_group)
 
+        # Project Sync group
+        ps_group = QGroupBox("Project Sync")
+        ps_form = QFormLayout(ps_group)
+
+        self._project_sync_edit = HotkeyEdit(project_sync_hotkey)
+        ps_form.addRow("Scan Hotkey:", self._project_sync_edit)
+
+        self._auto_sync_cb = QCheckBox("Auto-sync when project screen is detected")
+        self._auto_sync_cb.setChecked(project_auto_sync)
+        self._auto_sync_cb.setToolTip(
+            "When enabled, the overlay polls the screen every few seconds.\n"
+            "If a project hand-in screen is detected it is read automatically."
+        )
+        ps_form.addRow(self._auto_sync_cb)
+
+        layout.addWidget(ps_group)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save
             | QDialogButtonBox.StandardButton.Cancel
@@ -147,3 +166,11 @@ class SettingsDialog(QDialog):
     @property
     def minimap_opacity(self) -> float:
         return self._opacity_slider.value() / 100.0
+
+    @property
+    def project_sync_hotkey(self) -> str:
+        return self._project_sync_edit.text().strip()
+
+    @property
+    def project_auto_sync(self) -> bool:
+        return self._auto_sync_cb.isChecked()
